@@ -28,12 +28,15 @@ Credentials stay inside the browser profile. UCOS never accepts or stores the af
 
 ## API
 
-Authenticated UCOS API clients can use:
+The current standalone agent tool is:
 
-- `GET /affiliate/amazon/status?account_ref=amazon-primary`
-- `POST /affiliate/amazon/search` with `{ "account_ref": "amazon-primary", "query": "coffee maker" }`
+- `POST /tool/amazon/product`
+- Header: `Authorization: Bearer <UCOS_BROWSER_AGENT_TOKEN>` (separate from the operator console token)
+- JSON body: `{"profile_ref":"amazon-primary","marketplace":"amazon.com","product_url":"https://www.amazon.com/dp/B012345678","fields":["title","price","rating","availability"],"generate_affiliate_link":true}`
 
-The search endpoint returns `state=verified` only after a real HTTPS Amazon URL with an Associates tag is observed through the browser workflow. Untagged or synthetic URLs fail closed.
+The endpoint returns page-observed product fields, evidence, missing fields, and an affiliate URL only when a recent Amazon-origin clipboard write is captured and its format passes validation. `affiliate_link_format_valid` is a format check only; it is not redirect-destination or Associates-account verification. The agent endpoint is restricted to the existing `amazon-primary` profile.
+
+The historical `/affiliate/amazon/status` and `/affiliate/amazon/search` paths are not implemented by the current standalone HTTP handler. Product search-query input is also not implemented yet; the current tool requires a product URL.
 
 ## One-time account login
 

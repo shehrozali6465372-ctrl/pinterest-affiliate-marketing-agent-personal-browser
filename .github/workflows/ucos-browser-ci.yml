@@ -5,6 +5,9 @@ on:
     paths:
       - "services/ucos_browser/**"
       - "tests/test_ucos_personal_browser.py"
+      - "tests/test_amazon_product_tool.py"
+      - "tests/test_amazon_product_tool_http.py"
+      - "tests/test_product_research.py"
       - "tests/test_browser_profile_persistence.py"
       - "tests/test_browser_session_health_auth.py"
       - "tests/test_browser_audit_storage.py"
@@ -13,6 +16,9 @@ on:
     paths:
       - "services/ucos_browser/**"
       - "tests/test_ucos_personal_browser.py"
+      - "tests/test_amazon_product_tool.py"
+      - "tests/test_amazon_product_tool_http.py"
+      - "tests/test_product_research.py"
       - "tests/test_browser_profile_persistence.py"
       - "tests/test_browser_session_health_auth.py"
       - "tests/test_browser_audit_storage.py"
@@ -33,8 +39,8 @@ jobs:
         run: pip install -r services/ucos_browser/requirements.txt pytest
       - name: Install Chromium matching Playwright
         run: playwright install chromium
-      - name: Browser contract and persistence tests
-        run: PYTHONPATH=. pytest -q tests/test_ucos_personal_browser.py tests/test_browser_profile_persistence.py tests/test_browser_session_health_auth.py tests/test_browser_audit_storage.py
+      - name: Browser contract, product research, Amazon tool, and persistence tests
+        run: PYTHONPATH=. pytest -q tests/test_ucos_personal_browser.py tests/test_amazon_product_tool.py tests/test_amazon_product_tool_http.py tests/test_product_research.py tests/test_browser_profile_persistence.py tests/test_browser_session_health_auth.py tests/test_browser_audit_storage.py
       - name: Real Chromium smoke test
         env:
           UCOS_BROWSER_TOKEN: ci-smoke-token
