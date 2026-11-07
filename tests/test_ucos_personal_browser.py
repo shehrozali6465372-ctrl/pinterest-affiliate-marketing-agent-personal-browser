@@ -2,6 +2,7 @@ import pytest
 
 from services.ucos_browser.server import (
     _AFFILIATE_CLIPBOARD_CAPTURE_SCRIPT,
+    _AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT,
     _is_amazon_affiliate_link,
     validate_url,
 )
@@ -200,7 +201,7 @@ def test_screen_click_uses_validated_viewport_coordinates(monkeypatch):
 
     assert page.mouse.calls == [("click", 120, 80)]
     assert result["viewport"] == {"width": 640, "height": 480}
-    assert result["focused"]["editable"] is True
+    assert "focused" not in result
     assert result["screenshot"] == b"png".hex()
 
 
@@ -237,7 +238,7 @@ def test_screen_interactions_scroll_type_and_press(monkeypatch):
 
 
 
-def test_navigation_during_focus_read_does_not_fail_click(monkeypatch):
+def test_screen_click_does_not_wait_for_optional_focus_metadata(monkeypatch):
     class NavigatingPage(_FakeBrowserPage):
         def evaluate(self, _script):
             raise RuntimeError(
@@ -256,10 +257,124 @@ def test_navigation_during_focus_read_does_not_fail_click(monkeypatch):
         ],
     })
 
-    # The actual click and screenshot must still succeed even if optional focus
-    # metadata cannot be read during a page navigation.
+    # The click path must not execute a renderer round-trip for optional
+    # focus metadata; a click can coincide with document navigation.
     assert page.mouse.calls == [("click", 200, 120)]
     assert result["events"][0]["type"] == "click_at"
-    assert result["focused"]["editable"] is False
-    assert result["focused"]["unavailable"] is True
+    assert "focused" not in result
     assert result["screenshot"] == b"png".hex()
+
+
+def test_browser_request_guard_blocks_private_redirect_or_subresource():
+    from services.ucos_browser.server import _guard_browser_request
+
+    class Request:
+        url = "http://127.0.0.1:8080/internal"
+
+    class Route:
+        request = Request()
+
+        def __init__(self):
+            self.aborted = None
+            self.continued = False
+
+        def abort(self, reason):
+            self.aborted = reason
+
+        def continue_(self):
+            self.continued = True
+
+    route = Route()
+    _guard_browser_request(route)
+    assert route.aborted == "blockedbyclient"
+    assert route.continued is False
+
+
+def test_browser_request_guard_allows_public_https_request(monkeypatch):
+    from services.ucos_browser import server
+
+    class Request:
+        url = "https://cdn.example.com/script.js"
+
+    class Route:
+        request = Request()
+
+        def __init__(self):
+            self.aborted = None
+            self.continued = False
+
+        def abort(self, reason):
+            self.aborted = reason
+
+        def continue_(self):
+            self.continued = True
+
+    monkeypatch.setattr(server, "validate_url", lambda value: value)
+    route = Route()
+    server._guard_browser_request(route)
+    assert route.aborted is None
+    assert route.continued is True
+
+
+@pytest.mark.parametrize(
+    ("source", "age_ms", "expected"),
+    [
+        ("clipboard.writeText", 0, True),
+        ("clipboard.write", 100000, True),
+        ("document.execCommand", 100000, True),
+        ("clipboard.writeText", 400000, False),
+        ("dom.input", 0, False),
+        ("selection", 0, False),
+        ("", 0, False),
+        ("clipboard.writeText", -10000, False),
+    ],
+)
+def test_affiliate_candidate_requires_recent_supported_clipboard_provenance(
+    source, age_ms, expected
+):
+    from playwright.sync_api import sync_playwright
+
+    url = "https://www.amazon.com/dp/B012345678?tag=ci-store-20"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            page = browser.new_page()
+            page.set_content("<a href='https://www.amazon.com/dp/B012345678?tag=dom-20'>product</a><input value='https://www.amazon.com/dp/B012345678?tag=input-20'>")
+            page.evaluate(
+                """({text, source, ageMs}) => {
+                    window.__ucosAffiliateClipboardState = {
+                        text, source, updatedAt: Date.now() - ageMs
+                    };
+                }""",
+                {"text": url, "source": source, "ageMs": age_ms},
+            )
+            result = page.evaluate(_AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT)
+            assert bool(result) is expected
+            if expected:
+                assert result == [url]
+        finally:
+            browser.close()
+
+
+def test_affiliate_candidate_rejects_missing_or_non_numeric_timestamp():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        try:
+            page = browser.new_page()
+            page.set_content("<a href='https://www.amazon.com/dp/B012345678?tag=dom-20'>product</a>")
+            for timestamp in (None, "not-a-number"):
+                page.evaluate(
+                    """timestamp => {
+                        window.__ucosAffiliateClipboardState = {
+                            text: 'https://www.amazon.com/dp/B012345678?tag=ci-store-20',
+                            source: 'clipboard.writeText',
+                            updatedAt: timestamp
+                        };
+                    }""",
+                    timestamp,
+                )
+                assert page.evaluate(_AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT) == []
+        finally:
+            browser.close()

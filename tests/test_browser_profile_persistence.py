@@ -284,7 +284,11 @@ def test_new_browser_runtime_restores_saved_neon_state_on_each_creation(monkeypa
         def __init__(self):
             self.cookies = []
             self.scripts = []
+            self.routes = []
             self.pages = [FakePage()]
+
+        def route(self, pattern, handler):
+            self.routes.append((pattern, handler))
 
         def add_cookies(self, cookies):
             self.cookies.extend(cookies)
@@ -341,6 +345,8 @@ def test_new_browser_runtime_restores_saved_neon_state_on_each_creation(monkeypa
         assert first["profile_persistence_backend"] == "neon_postgres"
         assert contexts[0].cookies == saved_state["cookies"]
         assert "restored-local-storage" in contexts[0].scripts[0]
+        assert len(contexts[0].routes) == 1
+        assert contexts[0].routes[0][0] == "**/*"
 
         browser_server._close_browser_runtime()
         second, recreated = browser_server._get_browser_runtime("amazon-primary", 5000)

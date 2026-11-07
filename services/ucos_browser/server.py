@@ -7,7 +7,7 @@ CAPTCHA/anti-bot bypass instructions.
 """
 from __future__ import annotations
 
-import atexit
+import hmac
 import ipaddress
 import json
 import logging
@@ -37,6 +37,24 @@ except ImportError:  # direct execution or tests importing server.py by file pat
             raise RuntimeError("UCOS browser profile persistence module is unavailable")
         profile_persistence = importlib.util.module_from_spec(_profile_spec)
         _profile_spec.loader.exec_module(profile_persistence)
+
+try:
+    from . import product_research
+except ImportError:  # direct file-path imports used by the service's test harness
+    try:
+        import product_research
+    except ImportError:
+        import importlib.util
+        _research_module_path = Path(__file__).with_name("product_research.py")
+        _research_spec = importlib.util.spec_from_file_location(
+            "ucos_browser_product_research", _research_module_path
+        )
+        if _research_spec is None or _research_spec.loader is None:
+            raise RuntimeError("UCOS product research module is unavailable")
+        import sys
+        product_research = importlib.util.module_from_spec(_research_spec)
+        sys.modules[_research_spec.name] = product_research
+        _research_spec.loader.exec_module(product_research)
 
 
 LOG = logging.getLogger("ucos.browser")
@@ -79,6 +97,21 @@ def _assert_public_page(page) -> None:
     validate_url(page.url)
 
 
+def _guard_browser_request(route) -> None:
+    """Apply the public-network URL policy to every browser network request.
+
+    This covers redirects and subresources as well as top-level navigation.
+    Network-level egress controls are still required to eliminate DNS-rebinding
+    and resolution-to-connect time-of-check/time-of-use gaps.
+    """
+    try:
+        validate_url(route.request.url)
+    except (TypeError, ValueError):
+        route.abort("blockedbyclient")
+        return
+    route.continue_()
+
+
 _AMAZON_MARKETPLACE_DOMAINS = {
     "amazon.com", "amazon.co.uk", "amazon.de", "amazon.fr", "amazon.ca",
     "amazon.co.jp", "amazon.in", "amazon.it", "amazon.es", "amazon.nl",
@@ -95,16 +128,34 @@ def _is_amazon_affiliate_link(value: str) -> bool:
         host = (parsed.hostname or "").lower().rstrip(".")
         if parsed.scheme != "https" or not host:
             return False
+        if parsed.username or parsed.password or parsed.port:
+            return False
         if host == "amzn.to":
             return bool(parsed.path.strip("/"))
         is_marketplace = any(
-            host == domain or host.endswith("." + domain)
+            host in {domain, "www." + domain}
             for domain in _AMAZON_MARKETPLACE_DOMAINS
         )
         tags = parse_qs(parsed.query, keep_blank_values=False).get("tag", [])
         return is_marketplace and any(str(tag).strip() for tag in tags)
     except (TypeError, ValueError):
         return False
+
+
+_AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT = """() => {
+    // Accept only a recent clipboard write observed by our Amazon
+    // SiteStripe capture hook. DOM links/inputs and selected text
+    // are not provenance: they may contain stale or unrelated URLs.
+    const state = window.__ucosAffiliateClipboardState;
+    if (!state || typeof state.text !== 'string' || !state.text.trim()) return [];
+    const ageMs = Date.now() - Number(state.updatedAt || 0);
+    const source = String(state.source || '');
+    const validSource = source === 'clipboard.writeText'
+        || source === 'clipboard.write'
+        || source === 'document.execCommand';
+    if (!validSource || !Number.isFinite(ageMs) || ageMs < 0 || ageMs > 300000) return [];
+    return [state.text.trim()];
+}"""
 
 
 _AFFILIATE_CLIPBOARD_CAPTURE_SCRIPT = r"""
@@ -329,6 +380,18 @@ def _profile_dir(profile_ref: str) -> tuple[str, bool]:
         return str(fallback), False
 
 
+def _amazon_agent_user_agent() -> str | None:
+    """Return an explicitly identified Amazon-agent UA, or fail closed."""
+    value = os.getenv("UCOS_AMAZON_AGENT_USER_AGENT", "").strip()
+    if not value:
+        return None
+    if len(value) > 256 or "\r" in value or "\n" in value:
+        return None
+    if "Agent/UCOSPersonalBrowser" not in value:
+        return None
+    return value
+
+
 def _close_browser_runtime_locked() -> None:
     global _BROWSER_RUNTIME
     runtime = _BROWSER_RUNTIME
@@ -381,15 +444,24 @@ def _get_browser_runtime(profile_ref: str, timeout: int) -> tuple[dict, bool]:
         saved_state = profile_persistence.load_profile_state(profile_ref) if state_store_enabled else None
         pw = sync_playwright().start()
         try:
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-zygote"],
-                ignore_https_errors=False,
-                accept_downloads=False,
-            )
+            context_options = {
+                "user_data_dir": profile_dir,
+                "headless": True,
+                "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-zygote"],
+                "ignore_https_errors": False,
+                "accept_downloads": False,
+            }
+            # If the Amazon agent route is ever approved, every browser HTTP(S)
+            # request must visibly identify this agent per Amazon Agent Terms.
+            agent_ua = _amazon_agent_user_agent()
+            if agent_ua:
+                context_options["user_agent"] = agent_ua
+            context = pw.chromium.launch_persistent_context(**context_options)
             if saved_state:
                 profile_persistence.restore_storage_state(context, saved_state)
+            # Enforce URL policy for redirects and every HTTP(S) subresource,
+            # not only the initial top-level navigation.
+            context.route("**/*", _guard_browser_request)
             # Preserve storage-restoration ordering; clipboard capture is additive.
             context.add_init_script(_AFFILIATE_CLIPBOARD_CAPTURE_SCRIPT)
             page = context.pages[0] if context.pages else context.new_page()
@@ -531,10 +603,14 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                     raise ValueError(
                         f"click_at coordinates must be within the {width}x{height} viewport"
                     )
+                # Keep the agent action path latency-bounded: the request
+                # interceptor already enforces the public-network policy for
+                # navigation, redirects and subresources. Re-resolving the
+                # current page hostname and evaluating focus metadata after a
+                # click adds network/renderer round-trips and can stall while
+                # the clicked page is navigating.
                 page.mouse.click(x, y)
-                _assert_public_page(page)
                 result["viewport"] = {"width": width, "height": height}
-                result["focused"] = _focused_element_state(page)
                 result["events"].append({
                     "type": "click_at", "x": round(x, 2), "y": round(y, 2)
                 })
@@ -648,34 +724,47 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                     }))"""
                 )
                 result["links"] = hrefs
+            elif kind == "amazon_product_details":
+                fields = action.get("fields") or ["title", "price", "rating", "availability"]
+                if not isinstance(fields, list) or len(fields) > 10:
+                    raise ValueError("amazon_product_details fields must be a list of at most 10 items")
+                selectors = {
+                    "title": ["#productTitle"],
+                    "price": ["#corePrice_feature_div .a-offscreen", "#priceblock_ourprice", "#priceblock_dealprice", ".apexPriceToPay .a-offscreen"],
+                    "rating": ["#acrPopover .a-icon-alt", "[data-hook='rating-out-of-text']"],
+                    "availability": ["#availability span", "#availability"],
+                }
+                product = {}
+                evidence = {}
+                for field in fields:
+                    if field not in selectors:
+                        raise ValueError(f"unsupported product field: {field}")
+                    value = None
+                    matched = None
+                    for selector in selectors[field]:
+                        try:
+                            locator = page.locator(selector).first
+                            if locator.count() and locator.is_visible():
+                                value = locator.inner_text(timeout=min(timeout, 2500)).strip()
+                                if value:
+                                    matched = selector
+                                    break
+                        except Exception:
+                            continue
+                    product[field] = value or None
+                    evidence[field] = {"selector": matched, "present": bool(value)}
+                result["product"] = product
+                result["evidence"] = evidence
+                result["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                result["warnings"] = [
+                    f"{field} unavailable on page" for field, value in product.items() if value is None
+                ]
+                result["events"].append({"type": "amazon_product_details_extracted"})
             elif kind == "affiliate_link":
                 # The remote browser has no access to the user's phone clipboard.
                 # Capture clipboard writes made by Amazon's link generator, then
                 # return only a validated Amazon Associates URL to the local console.
-                candidate_script = """() => {
-                    const out = [];
-                    const state = window.__ucosAffiliateClipboardState;
-                    if (state && typeof state.text === 'string' && state.text.trim()) {
-                        out.push(state.text.trim());
-                    }
-                    const nodes = document.querySelectorAll(
-                        'input,textarea,[data-clipboard-text],[data-clipboard-url],a[href]'
-                    );
-                    for (const el of Array.from(nodes).slice(0, 1200)) {
-                        for (const value of [
-                            el.getAttribute('data-clipboard-text') || '',
-                            el.getAttribute('data-clipboard-url') || '',
-                            (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
-                                ? el.value : '',
-                            el.href || ''
-                        ]) {
-                            if (value && out.length < 1200) out.push(String(value).trim());
-                        }
-                    }
-                    const selected = String(window.getSelection ? window.getSelection() : '').trim();
-                    if (selected) out.push(selected);
-                    return out;
-                }"""
+                candidate_script = _AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT
                 candidates = []
                 frames = getattr(page, "frames", None)
                 candidate_frames = frames if isinstance(frames, (list, tuple)) and frames else [page]
@@ -770,7 +859,10 @@ def _shutdown_browser_worker() -> None:
         _BROWSER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
-atexit.register(_shutdown_browser_worker)
+# ThreadPoolExecutor registers its own interpreter-shutdown hook before
+# ordinary atexit handlers run. Register ours with threading so the Playwright
+# context is closed on its owning worker thread before that executor is stopped.
+threading._register_atexit(_shutdown_browser_worker)
 
 def _record_task_run(task_id: str, task: dict, state: str, result=None, error=None, duration_ms=None) -> None:
     """Persist minimal browser task audit metadata; never store page text, screenshots, cookies, or credentials."""
@@ -816,10 +908,92 @@ def _record_task_run(task_id: str, task: dict, state: str, result=None, error=No
         LOG.warning("browser task audit write failed (%s)", type(exc).__name__)
 
 
-def _authorized(headers) -> bool:
-    token = os.getenv("UCOS_BROWSER_TOKEN", "").strip()
+
+
+def _amazon_product_tool_task(payload: dict) -> dict:
+    """Translate one agent tool request into a bounded Amazon browser workflow."""
+    marketplace = str(payload.get("marketplace", "amazon.com")).strip().lower()
+    allowed = {domain for domain in _AMAZON_MARKETPLACE_DOMAINS}
+    if marketplace not in allowed:
+        raise ValueError("marketplace must be a supported Amazon marketplace domain")
+    product_url = str(payload.get("product_url", "")).strip()
+    if not product_url:
+        raise ValueError("product_url is required")
+    parsed = urlsplit(product_url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port:
+        raise ValueError("product_url must be a credential-free HTTPS URL on the selected Amazon marketplace")
+    if host not in {marketplace, "www." + marketplace}:
+        if host in {domain for domain in allowed} or host in {"www." + domain for domain in allowed}:
+            raise ValueError("product_url marketplace does not match marketplace")
+        raise ValueError("product_url must be an HTTPS URL on the selected Amazon marketplace")
+    profile_ref = payload.get("profile_ref", "amazon-primary")
+    if profile_ref != "amazon-primary":
+        raise ValueError("this agent tool is restricted to the existing amazon-primary profile")
+
+    requested_fields = payload.get("fields")
+    if requested_fields is None:
+        requested_fields = ["title", "price", "rating", "availability"]
+    if not isinstance(requested_fields, list) or not requested_fields:
+        raise ValueError("fields must be a non-empty list")
+    if any(not isinstance(item, str) or not item.strip() for item in requested_fields):
+        raise ValueError("each requested field must be a non-empty string")
+    requested_fields = requested_fields[:]
+    if len(requested_fields) > 5:
+        raise ValueError("fields may contain at most 5 supported product fields")
+    requested_generate_link = payload.get("generate_affiliate_link", True)
+    if not isinstance(requested_generate_link, bool):
+        raise ValueError("generate_affiliate_link must be a boolean")
+
+    requested_fields = requested_fields or [
+        "title", "price", "rating", "availability"
+    ]
+    supported_fields = {"title", "price", "rating", "availability"}
+    fields = list(dict.fromkeys(item.strip() for item in requested_fields))
+    unknown = sorted(set(fields) - supported_fields)
+    if unknown:
+        raise ValueError("unsupported product fields: " + ", ".join(unknown))
+
+    actions = [
+        {"type": "navigate", "url": product_url},
+        {"type": "amazon_product_details", "fields": fields},
+    ]
+    if requested_generate_link:
+        actions.append({"type": "affiliate_link"})
+    raw = execute_task({
+        "profile_ref": profile_ref,
+        "timeout_ms": payload.get("timeout_ms", DEFAULT_TIMEOUT_MS),
+        "actions": actions,
+    })
+    details = raw.get("product") or {}
+    missing_fields = [field for field, value in details.items() if value is None]
+    affiliate_link = raw.get("affiliate_link")
+    affiliate_format_valid = bool(affiliate_link and _is_amazon_affiliate_link(affiliate_link))
+    if requested_generate_link and not affiliate_format_valid:
+        missing_fields.append("affiliate_link")
+    complete = not missing_fields
+    return {
+        "status": "completed" if complete else "partial",
+        "product": details,
+        "affiliate_link": affiliate_link if affiliate_format_valid else None,
+        "affiliate_link_format_valid": affiliate_format_valid,
+        "affiliate_link_verification_scope": "format_only; redirect_destination_and_associates_account_not_verified",
+        "missing_fields": missing_fields,
+        "source_url": raw.get("final_url"),
+        "verified_at": raw.get("verified_at"),
+        "profile_ref": raw.get("profile_ref"),
+        "session_reused": raw.get("session_reused"),
+        "duration_ms": raw.get("duration_ms"),
+        "evidence": raw.get("evidence", {}),
+        "warnings": raw.get("warnings", []),
+    }
+
+def _authorized(headers, token_env: str = "UCOS_BROWSER_TOKEN") -> bool:
+    """Authorize one explicitly scoped bearer token using constant-time comparison."""
+    token = os.getenv(token_env, "").strip()
     supplied = str(headers.get("Authorization", ""))
-    return bool(token) and supplied == f"Bearer {token}"
+    expected = f"Bearer {token}" if token else ""
+    return bool(token) and hmac.compare_digest(supplied, expected)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -908,26 +1082,76 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"status": "ok", "service": "ucos-personal-browser", "engine": "playwright-chromium"})
 
     def do_POST(self):
-        if self.path.rstrip("/") != "/execute":
+        route = self.path.rstrip("/")
+        if route not in {"/execute", "/tool/amazon/product", "/tool/product/research"}:
             self._send(404, {"error": "not found"})
             return
-        if not _authorized(self.headers):
+        # The operator token is console-only. Agent tool routes use a
+        # distinct credential so an agent cannot reuse its tool token against
+        # the unrestricted operator browser endpoint (or vice versa).
+        auth_env = "UCOS_BROWSER_AGENT_TOKEN" if route in {
+            "/tool/amazon/product", "/tool/product/research"
+        } else "UCOS_BROWSER_TOKEN"
+        if not _authorized(self.headers, auth_env):
             self._send(401, {"error": "authentication required"})
             return
+        if route == "/tool/amazon/product":
+            approved = os.getenv("UCOS_AMAZON_AGENT_ACCESS_APPROVED", "false").strip().lower() in {"1", "true", "yes"}
+            agent_ua = _amazon_agent_user_agent()
+            if not approved or not agent_ua:
+                self._send(403, {
+                    "state": "blocked",
+                    "error": "live Amazon agent access requires documented policy approval and an explicit Agent/UCOSPersonalBrowser User-Agent",
+                })
+                return
         task_id = uuid.uuid4().hex
         started = time.monotonic()
         payload = {}
         try:
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                raise ValueError("Content-Type must be application/json")
+            if self.headers.get("Content-Encoding", "identity").strip().lower() not in {"", "identity"}:
+                raise ValueError("compressed request bodies are not supported")
             size = int(self.headers.get("Content-Length", "0"))
             if size <= 0 or size > 1_000_000:
                 raise ValueError("request body must be 1..1000000 bytes")
             payload = json.loads(self.rfile.read(size))
             if not isinstance(payload, dict):
                 raise ValueError("request body must be an object")
+            if route == "/tool/product/research":
+                result = product_research.research(payload)
+                duration_ms = int((time.monotonic() - started) * 1000)
+                audit_task = {"profile_ref": "product-research", "url": payload.get("product_url", "")}
+                _record_task_run(task_id, audit_task, "completed", result=result, duration_ms=duration_ms)
+                self._send(200, {"state": "completed", "task_id": task_id, "result": result})
+                return
+            if route == "/tool/amazon/product":
+                result = _amazon_product_tool_task(payload)
+                audit_task = {
+                    "profile_ref": result.get("profile_ref", "amazon-primary"),
+                    "url": result.get("source_url", payload.get("product_url", "")),
+                }
+                duration_ms = int((time.monotonic() - started) * 1000)
+                _record_task_run(task_id, audit_task, "completed", result=result, duration_ms=duration_ms)
+                self._send(200, {"state": "completed", "task_id": task_id, "result": result})
+                return
             result = execute_task(payload)
             duration_ms = int((time.monotonic() - started) * 1000)
             _record_task_run(task_id, payload, "completed", result=result, duration_ms=duration_ms)
             self._send(200, {"state": "completed", "task_id": task_id, "result": result})
+        except product_research.ProviderAccessDenied as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            _record_task_run(task_id, {"profile_ref": "product-research"}, "rejected", error=exc, duration_ms=duration_ms)
+            self._send(403, {"state": "blocked", "task_id": task_id, "error": "provider access denied"})
+        except product_research.ProviderRateLimited as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            _record_task_run(task_id, {"profile_ref": "product-research"}, "failed", error=exc, duration_ms=duration_ms)
+            self._send(429, {"state": "rate_limited", "task_id": task_id, "error": "provider rate limit reached"})
+        except (product_research.ProviderNotConfigured, product_research.ProviderTemporaryFailure) as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            _record_task_run(task_id, {"profile_ref": "product-research"}, "rejected", error=exc, duration_ms=duration_ms)
+            self._send(503, {"state": "unavailable", "task_id": task_id, "error": str(exc)})
         except (ValueError, TypeError) as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             if isinstance(payload, dict):
