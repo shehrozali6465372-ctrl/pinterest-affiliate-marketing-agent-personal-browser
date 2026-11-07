@@ -39,3 +39,95 @@ def test_amazon_agent_tool_rejects_non_integer_timeout():
     from services.ucos_browser.server import _amazon_product_tool_task
     with pytest.raises(ValueError, match="timeout_ms must be an integer"):
         _amazon_product_tool_task({"keyword": "spice rack", "timeout_ms": True})
+
+
+def test_amazon_search_url_is_marketplace_scoped_and_encodes_keyword():
+    from services.ucos_browser.server import _amazon_search_url
+    from urllib.parse import urlsplit, parse_qs
+
+    url = _amazon_search_url("amazon.com", "drawer organizer & bins")
+    parsed = urlsplit(url)
+    assert parsed.scheme == "https"
+    assert parsed.hostname == "www.amazon.com"
+    assert parsed.path == "/s"
+    assert parse_qs(parsed.query) == {"k": ["drawer organizer & bins"]}
+
+
+def test_amazon_search_url_rejects_unapproved_marketplace():
+    from services.ucos_browser.server import _amazon_search_url
+    with pytest.raises(ValueError, match="unsupported Amazon marketplace"):
+        _amazon_search_url("amazon.example", "test")
+
+
+def test_amazon_verification_page_is_classified_without_bypass():
+    from services.ucos_browser.server import _amazon_verification_challenge
+
+    class Body:
+        def inner_text(self, timeout):
+            assert timeout == 2_000
+            return "To discuss automated access to Amazon data, solve the robot check."
+
+    class Page:
+        def title(self):
+            return "Amazon.com"
+        def locator(self, selector):
+            assert selector == "body"
+            return Body()
+
+    assert _amazon_verification_challenge(Page()) is True
+
+
+def test_amazon_product_result_locator_uses_fallback_card_selector():
+    from services.ucos_browser.server import _amazon_product_result_locator
+
+    class Candidate:
+        def is_visible(self):
+            return True
+        def get_attribute(self, name):
+            assert name == "href"
+            return "/dp/B012345678?ref=sr_1_1"
+
+    class Empty:
+        def count(self):
+            return 0
+
+    class Matches:
+        def count(self):
+            return 1
+        def nth(self, index):
+            assert index == 0
+            return Candidate()
+
+    class Page:
+        def locator(self, selector):
+            if selector == "h2 a[href*='/dp/']":
+                return Matches()
+            return Empty()
+
+    assert _amazon_product_result_locator(Page()) is not None
+
+
+def test_amazon_product_result_locator_ignores_non_product_links():
+    from services.ucos_browser.server import _amazon_product_result_locator
+
+    class Candidate:
+        def is_visible(self):
+            return True
+        def get_attribute(self, name):
+            return "/help/contact-us"
+
+    class Matches:
+        def count(self):
+            return 1
+        def nth(self, index):
+            return Candidate()
+
+    class Empty:
+        def count(self):
+            return 0
+
+    class Page:
+        def locator(self, selector):
+            return Matches() if selector == "h2 a[href*='/dp/']" else Empty()
+
+    assert _amazon_product_result_locator(Page()) is None
