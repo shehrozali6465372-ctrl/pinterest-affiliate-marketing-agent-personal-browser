@@ -189,6 +189,48 @@ def _amazon_verification_challenge(page) -> bool:
     return any(marker in title or marker in body for marker in markers)
 
 
+def _click_sitestripe_get_link(page, timeout: int) -> bool:
+    """Click the visible SiteStripe Get Link control, including inside its iframe.
+
+    Amazon may render SiteStripe controls in a child frame. Search each frame
+    with semantic selectors as well as the historical ID selector; never click
+    a hidden or unrelated control.
+    """
+    frames = getattr(page, "frames", None)
+    candidates = list(frames) if frames else [page]
+    if page not in candidates:
+        candidates.insert(0, page)
+
+    exact_name = re.compile(r"^\\s*get\\s*link\\s*$", re.I)
+    for frame in candidates:
+        locators = []
+        try:
+            locators.append(frame.locator("#amzn-ss-get-link-button").first)
+        except Exception:
+            pass
+        try:
+            locators.append(frame.get_by_role("button", name=exact_name).first)
+        except Exception:
+            pass
+        try:
+            locators.append(frame.get_by_text(exact_name).first)
+        except Exception:
+            pass
+        try:
+            locators.append(frame.locator("button").filter(has_text=exact_name).first)
+        except Exception:
+            pass
+
+        for control in locators:
+            try:
+                if control.count() and control.is_visible():
+                    control.click(timeout=min(timeout, 5000))
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 def _amazon_product_result_locator(page):
     """Find a human-visible Amazon product title link, never an aria-hidden image link."""
     selectors = (
@@ -872,23 +914,7 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                 # Use the visible Associates SiteStripe controls only. No DOM
                 # product fields are read or returned; capture is limited to
                 # the fresh URL copied by SiteStripe itself.
-                clicked = False
-                for frame in getattr(page, "frames", [page]):
-                    try:
-                        control = frame.locator("#amzn-ss-get-link-button").first
-                        if control.count() and control.is_visible():
-                            control.click(timeout=min(timeout, 5000))
-                            clicked = True
-                            break
-                    except Exception:
-                        continue
-                if not clicked:
-                    try:
-                        page.get_by_text("Get Link", exact=True).first.click(timeout=min(timeout, 5000))
-                        clicked = True
-                    except Exception:
-                        pass
-                if not clicked:
+                if not _click_sitestripe_get_link(page, timeout):
                     raise ValueError("Amazon Associates SiteStripe Get Link control is unavailable; verify Associates sign-in and SiteStripe visibility")
                 page.wait_for_timeout(500)
                 text_option_clicked = False
