@@ -315,3 +315,13 @@ def test_amazon_search_select_navigates_to_validated_product_href_without_click(
     assert page.click_calls == 0
     assert result["final_url"] == page.url
     assert result["events"][-1]["type"] == "amazon_search_and_first_result_selected"
+
+
+
+def test_agent_user_agent_is_scoped_to_agent_profile(monkeypatch):
+    from services.ucos_browser.server import _profile_user_agent
+
+    configured = "Mozilla/5.0 Agent/UCOSPersonalBrowser"
+    monkeypatch.setenv("UCOS_AMAZON_AGENT_USER_AGENT", configured)
+    assert _profile_user_agent("amazon-primary") is None
+    assert _profile_user_agent("amazon-agent") == configured
