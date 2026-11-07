@@ -601,6 +601,13 @@ def _amazon_agent_user_agent() -> str | None:
     return value
 
 
+def _profile_user_agent(profile_ref: str) -> str | None:
+    """Apply the declared agent identity only to the isolated agent profile."""
+    if profile_ref != "amazon-agent":
+        return None
+    return _amazon_agent_user_agent()
+
+
 def _close_browser_runtime_locked() -> None:
     global _BROWSER_RUNTIME
     runtime = _BROWSER_RUNTIME
@@ -662,8 +669,8 @@ def _get_browser_runtime(profile_ref: str, timeout: int) -> tuple[dict, bool]:
             }
             # If the Amazon agent route is ever approved, every browser HTTP(S)
             # request must visibly identify this agent per Amazon Agent Terms.
-            agent_ua = _amazon_agent_user_agent()
-            if profile_ref == "amazon-agent" and agent_ua:
+            agent_ua = _profile_user_agent(profile_ref)
+            if agent_ua:
                 context_options["user_agent"] = agent_ua
             context = pw.chromium.launch_persistent_context(**context_options)
             if saved_state:
