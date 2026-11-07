@@ -14,7 +14,7 @@ def test_amazon_product_tool_http_requires_bearer_auth(monkeypatch):
     thread.start()
     try:
         body = json.dumps({
-            "product_url": "https://www.amazon.com/dp/B012345678"
+            "keyword": "3 tier spice rack"
         }).encode()
         request = Request(
             f"http://127.0.0.1:{httpd.server_port}/tool/amazon/product",
@@ -44,9 +44,7 @@ def test_amazon_product_tool_http_dispatches_and_wraps_result(monkeypatch):
     monkeypatch.setenv("UCOS_AMAZON_AGENT_ACCESS_APPROVED", "true")
     monkeypatch.setenv("UCOS_AMAZON_AGENT_USER_AGENT", "UCOSPersonalBrowser Agent/UCOSPersonalBrowser")
     monkeypatch.setattr(module, "_amazon_product_tool_task", lambda payload: {
-        "status": "partial",
-        "product": {"title": "Example"},
-        "affiliate_link": None,
+        "affiliate_url": "https://www.amazon.com/dp/B012345678?tag=test-20",
     })
     monkeypatch.setattr(module, "_record_task_run", lambda *args, **kwargs: None)
     httpd = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
@@ -54,7 +52,7 @@ def test_amazon_product_tool_http_dispatches_and_wraps_result(monkeypatch):
     thread.start()
     try:
         body = json.dumps({
-            "product_url": "https://www.amazon.com/dp/B012345678"
+            "keyword": "3 tier spice rack"
         }).encode()
         request = Request(
             f"http://127.0.0.1:{httpd.server_port}/tool/amazon/product",
@@ -68,8 +66,7 @@ def test_amazon_product_tool_http_dispatches_and_wraps_result(monkeypatch):
         with urlopen(request, timeout=3) as response:
             payload = json.loads(response.read().decode())
         assert payload["state"] == "completed"
-        assert payload["result"]["status"] == "partial"
-        assert payload["result"]["affiliate_link"] is None
+        assert payload["result"] == {"affiliate_url": "https://www.amazon.com/dp/B012345678?tag=test-20"}
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -91,7 +88,7 @@ def test_amazon_product_tool_http_fails_closed_without_policy_approval(monkeypat
     try:
         request = Request(
             f"http://127.0.0.1:{httpd.server_port}/tool/amazon/product",
-            data=json.dumps({"product_url": "https://www.amazon.com/dp/B012345678"}).encode(),
+            data=json.dumps({"keyword": "3 tier spice rack"}).encode(),
             headers={
                 "Authorization": "Bearer agent-tool-test",
                 "Content-Type": "application/json",
@@ -128,7 +125,7 @@ def test_amazon_product_tool_http_requires_agent_identifying_user_agent(monkeypa
     try:
         request = Request(
             f"http://127.0.0.1:{httpd.server_port}/tool/amazon/product",
-            data=json.dumps({"product_url": "https://www.amazon.com/dp/B012345678"}).encode(),
+            data=json.dumps({"keyword": "3 tier spice rack"}).encode(),
             headers={
                 "Authorization": "Bearer agent-tool-test",
                 "Content-Type": "application/json",

@@ -1,6 +1,6 @@
 # Pinterest Affiliate Marketing Agent Personal Browser — Master Context
 
-Last updated: 2026-11-06
+Last updated: 2026-11-07
 Repository: `/root/Pinterest-affiliate-marketing-agent-personal-browser`
 Purpose: authoritative working context for this standalone browser service. Update this file after meaningful project changes. Verify before repeating work.
 
@@ -10,7 +10,7 @@ Purpose: authoritative working context for this standalone browser service. Upda
 
 **Project:** Pinterest Affiliate Marketing Agent Personal Browser
 **Service identity:** UCOS Personal Browser / `ucos-personal-browser`
-**Role:** a callable browser and product-research tool for the Pinterest Affiliate Marketing Agent. It is not a second autonomous agent.
+**Role:** a callable Personal Browser used only to obtain the account owner’s Amazon Associates affiliate URL from a keyword search. It is not a product-research service or a second autonomous agent.
 
 The upstream Pinterest Affiliate Marketing Agent owns:
 - Product strategy and selection decisions
@@ -21,15 +21,16 @@ The upstream Pinterest Affiliate Marketing Agent owns:
 
 This browser service owns:
 - Controlled browser execution and authenticated browser-profile reuse
-- Product research API contract and provider adapters
-- Returning observed/authorized product data with evidence and missing-field reporting
-- Passing through provider-issued affiliate links without inventing tracking tags
+- Open Amazon in the existing logged-in browser profile
+- Search Amazon using the keyword supplied by the agent
+- Select the requested product from search results
+- Use SiteStripe to obtain the owner account’s affiliate URL
+- Return only that affiliate URL to the agent
 
 **Strict boundaries**
 - Do not create, schedule, or publish Pinterest Pins from this service.
 - Never publish a real Pin during testing.
-- Do not upload or host images. Return permitted remote image URLs only.
-- Do not fabricate product fields, product availability, affiliate links, tracking IDs, account approval, or test results. Unknown data stays null/partial.
+- Do not collect, return, store, or analyze product data. The only business output in scope is the affiliate URL generated for the selected product through the owner’s Associates account.
 - Do not expose passwords, cookies, browser storage state, API tokens, encryption keys, database URLs, or other secret values.
 - Do not bypass CAPTCHA, MFA, anti-bot checks, or provider access controls.
 - Do not integrate with Model 1 / the main agent until the standalone browser is ready and integration is explicitly approved.
@@ -108,56 +109,20 @@ Latest local `.env` audit checked key presence only; all 11 browser runtime keys
 - Shutdown closes the Playwright context on its worker thread before executor shutdown.
 - Browser request interceptor validates HTTP(S) requests and blocks private/local network targets. DNS rebinding / resolution-to-connect TOCTOU risk remains; host/container network egress controls are still required.
 
-### Amazon product tool
-- Authenticated `POST /tool/amazon/product`
-- Restricted to the existing `amazon-primary` profile and configured marketplace hosts.
-- Supported fields: title, price, rating, availability.
-- Review count/content are not in scope.
-- Affiliate link capture depends on a recent clipboard write originating from an Amazon page/frame (maximum age 5 minutes), then URL/tag format validation.
-- Response field `affiliate_link_format_valid` means format validation only. It does NOT verify redirect destination, Associates account ownership, or final attribution.
-- Autonomous SiteStripe/Get Link trigger and redirect-destination verification are not implemented.
-- Route fails closed unless `UCOS_AMAZON_AGENT_ACCESS_APPROVED=true` and an explicit User-Agent containing `Agent/UCOSPersonalBrowser` are configured. These flags must remain unset until the policy gate is satisfied.
+### Sole Amazon workflow — affiliate URL only
 
-### Provider-neutral Product Research Engine
-- Module: `services/ucos_browser/product_research.py`
-- Endpoint: authenticated `POST /tool/product/research`
-- Tests: `tests/test_product_research.py`
-- Documentation: `docs/architecture/AGENT_TOOL_CONTRACT.md`
-- Adapter registry is empty by default. A provider must be explicitly registered; there is no generic website scraping fallback.
-- Request accepts exactly one of `search_query` or `product_url`, a source identifier, marketplace region code, requested fields, limit 1–20 and `require_affiliate_link`.
-- Supported fields: title, price, currency, product_url, image_url, category, brand, specifications, availability.
-- Review content and review counts are unsupported.
-- Product input URLs must be HTTPS public-domain URLs without IP literals, localhost, credentials, or explicit ports.
-- Provider output URLs must be HTTPS and credential-free. Provider text/specifications/evidence are size-bounded.
-- Provider-issued affiliate link is returned only when adapter status is `provider_confirmed`; unverified links are withheld.
-- Missing values remain null and product records become partial where requested fields or required affiliate links are absent.
-- Provider authorization failures map to HTTP 403; rate limits to HTTP 429; unavailable/unconfigured provider to HTTP 503.
-- No production provider adapter is currently registered. A call with an unconfigured source correctly returns 503.
+The ONLY Amazon task in scope is this exact sequence:
+1. Open Amazon in the existing logged-in `amazon-primary` browser profile.
+2. Enter the keyword supplied by the agent into Amazon search.
+3. Select the product requested/selected from the search results.
+4. Use the logged-in Associates account’s SiteStripe `Get Link` function to obtain its affiliate URL.
+5. Return that URL to the agent.
 
-## 5. Amazon compliance gate — hard blocker
+**No other Amazon work is authorized or requested.** Explicitly out of scope: product research, product-data extraction, prices, ratings, reviews, images, specifications, availability, catalog feeds, Creators API, Product Advertising API, alternative affiliate providers, product comparison, ranking, and keyword analytics. Do not add these features or providers.
 
-Official Amazon Associates and Creators API policy documentation was reviewed on 2026-11-06. Key conclusions recorded in `docs/architecture/AMAZON_COMPLIANCE_GATE.md`:
-- Amazon's Agent Terms address autonomous/semi-autonomous software acting for or under a person's instruction.
-- Agent HTTP(S) requests must identify the agent and include an `Agent/[agent name]` User-Agent.
-- Agents must not disguise access as human browsing or mimic human interaction speed/patterns. Human-vs-computer checks must be answered truthfully; no CAPTCHA or anti-bot circumvention.
-- Amazon may limit or prohibit agent access.
-- Program Content / IP License restrictions include limits on data mining, robots, similar data-gathering/extraction, and repurposing.
-- Creators API credentials do not automatically grant permission for every intended product aggregation, analysis, ranking, repurposing or Pinterest marketing workflow.
-- SiteStripe's user-facing Get Link feature is not, by itself, authorization for autonomous SiteStripe automation.
-- Therefore no Amazon scraping, autonomous SiteStripe automation, or production agent access until the exact workflow is confirmed permitted and any required express written approval is obtained.
-- Keep Amazon route fail-closed. Do not set approval flags based on assumptions.
+The browser may navigate/search/select only as required to produce the affiliate URL. Do not persist or return search-result/product data. Never fabricate a URL or tracking tag. If SiteStripe is unavailable, the account is logged out, or Amazon presents CAPTCHA/MFA/bot/access restrictions, stop and report the exact blocker; do not bypass it.
 
-## 6. Product source provider evaluation
-
-Report: `docs/architecture/PRODUCT_SOURCE_OPTIONS.md`
-
-Candidates researched:
-1. **Awin** — product feeds can provide product information and advertiser deep links; publisher account and eligible advertiser feed access required. Recommended first candidate if relevant US/UK Home & Kitchen feeds are available.
-2. **CJ Affiliate** — Product Feed API; requires publisher credentials/company ID and advertiser/feed permissions.
-3. **eBay Partner Network** — Browse API can return affiliate item URLs when valid ePN campaign context is supplied; requires eBay developer app and ePN campaign membership.
-4. **impact.com** — partner catalogs and promotional links depend on joined brands and enabled catalog/API access.
-
-No provider account has been accessed, no credentials supplied, and no live catalog queried. No provider has been silently selected or integrated. These networks are alternatives, not Amazon approvals or automatic replacements. Confirm each provider's terms permit the intended Pinterest workflow before adapter registration.
+Implementation status: the existing Amazon tool is only a prototype. It currently accepts a product URL and captures a recent Amazon-originated clipboard URL; it does NOT yet implement the required keyword → search results → product selection → SiteStripe URL → agent response sequence. This is the remaining functional gap. Any policy restriction must be checked against this narrow URL-only workflow; do not expand the scope into product-data APIs or extraction.
 
 ## 7. Security and engineering notes
 
@@ -165,10 +130,8 @@ No provider account has been accessed, no credentials supplied, and no live cata
 - Bearer authentication required for tool routes.
 - One browser worker / bounded execution.
 - Browser network URL guard blocks local/private targets; DNS rebinding protection still requires network-level egress controls.
-- Product provider adapter must use fixed official API/feed hosts, strict TLS validation, bounded timeouts, bounded response size and pagination, and exact provider authorization.
 - Do not accept arbitrary provider-supplied code or URLs as executable instructions.
 - Do not log tokens, cookies, credentials, encryption keys, full browser storage, or secret query parameters.
-- Do not host images; preserve allowed remote image URLs only.
 - Avoid duplicate work: inspect existing implementation and tests before changing files.
 
 ## 8. Current verification status (2026-11-07)
@@ -177,7 +140,7 @@ Latest checks performed in the connected local browser repository:
 - Full targeted regression suite after token-scope hardening: **80 passed in 99.63 seconds**, process exit code 0.
 - Python compile checks for `server.py`, `product_research.py`, and `profile_persistence.py`: passed.
 - `git diff --check`: passed.
-- Operator/agent credential separation implemented locally: `/execute`, `/health`, and `/session/health` use `UCOS_BROWSER_TOKEN`; `/tool/amazon/product` and `/tool/product/research` require the separate `UCOS_BROWSER_AGENT_TOKEN`. Bearer comparison uses `hmac.compare_digest`. Two new HTTP tests verify that neither token can access the other scope.
+- Operator/agent credential separation implemented locally: `/execute`, `/health`, and `/session/health` use `UCOS_BROWSER_TOKEN`; agent tool routes require the separate `UCOS_BROWSER_AGENT_TOKEN`. Bearer comparison uses `hmac.compare_digest`.
 - `.env` key inventory: all 11 browser runtime keys present; required values non-empty; `UCOS_BROWSER_AGENT_TOKEN` intentionally empty until Model 1 integration is provisioned; Amazon access gate explicitly disabled; Amazon User-Agent intentionally empty; file mode `0600`.
 - `.env` is ignored by Git; `git ls-files .env` returned no tracked file. Tracked-code secret scan found no obvious API-key/private-key/database-URL patterns.
 - Added tracked `.env.example` template with all 11 expected key names and safe empty/false defaults; no actual secrets or production values are included.
@@ -189,8 +152,7 @@ Latest checks performed in the connected local browser repository:
 - Live `POST /tool/amazon/product` and `POST /tool/product/research` returned 404, confirming these newly added tool routes are not present in the current live deployment. No authenticated request was made to them.
 - Current local branch `local/personal-browser-hardening` is based on `246ba63d`; changes remain uncommitted and unpushed. Render currently deploys the base commit, not the local working-tree changes.
 - Docker Engine build not verified; the local Docker command was previously identified as an `udocker` shim.
-- Amazon live extraction / SiteStripe is not tested and remains blocked by the policy gate. Do not enable it.
-- No live non-Amazon product provider adapter is registered/configured; mocked tests prove contract behavior only.
+- The required keyword → Amazon search → product selection → SiteStripe URL capture → agent return workflow has not been implemented or live-tested. The current prototype only accepts a product URL and clipboard-captures a link.
 - Model 1 end-to-end integration is not implemented or tested.
 - Amazon account login and durable restart restoration are not independently verified in this run.
 - No real Pinterest Pin was published; do not publish during verification.
@@ -224,19 +186,18 @@ No commit or push has been made for these local changes. Do not assume files are
 |---|---|---|
 | P0 | Deployment source alignment | Render deploys the base `246ba63d` commit from `universal-content-operating-system`; local hardening changes in this dedicated checkout are uncommitted. Agree the canonical source and ensure the deploy consumes the reviewed commit. |
 | P0 | Model 1 integration | Main agent checkout has no `UCOS_BROWSER` client references; implement and test a dedicated authenticated adapter without bypassing the unified publishing gateway. Do not alter the main checkout until its existing 397-commit-ahead and dirty working tree are reconciled. |
-| P0 | Amazon policy gate | Keep `UCOS_AMAZON_AGENT_ACCESS_APPROVED=false` and User-Agent empty until documented permission for the exact workflow or an approved official API use case is verified. |
-| P1 | Product provider | Adapter registry is empty. Select a provider only after publisher account/feed permissions and applicable data/image/Pinterest terms are verified; then configure official credentials and live contract checks. |
+| P0 | Keyword-to-affiliate-URL workflow | Implement and verify only Amazon keyword search, product selection, SiteStripe affiliate URL capture, and URL return. Stop on any Amazon access challenge; do not bypass it. |
 | P1 | Durable restart proof | Neon snapshot self-test and decryptability pass; controlled restart-and-restore test is still outstanding. It must confirm profile recovery without treating cookie count as login proof. |
 | P1 | Network egress hardening | Application blocks private/local destinations, but DNS rebinding / resolution-to-connect TOCTOU remains; enforce network-level egress controls before production tool exposure. |
 | P1 | Render runtime reliability | Service is on Free plan, first live readiness request took 23.2s, and Render service metadata has no health-check path configured. Decide whether production requires an always-on plan and `/readyz` health check. |
 
 Execution order:
 1. Reconcile canonical repository/deployment source and review the local diff; do not reset unrelated work.
-2. Complete browser security review, provider adapter implementation, and test coverage.
+2. Complete browser security review and tests for the keyword-to-affiliate-URL-only workflow.
 3. Build the Model 1 browser client in an isolated change with mock-based tests; keep all Pinterest publishing behind the existing unified gateway.
 4. Verify production environment variable *names and presence* in Render without retrieving or exposing secret values; preserve database/token/key separation.
 5. Run CI and the controlled restart/restore acceptance test.
-6. Obtain the required Amazon policy evidence or keep Amazon route disabled; activate only an authorized provider.
+6. Verify the exact URL-only SiteStripe workflow against applicable Amazon restrictions; stop if Amazon blocks or requires approval. Do not substitute another provider.
 7. Only after the user approves the exact release commit, push/deploy and perform live authenticated smoke checks.
 8. Keep verification read-only with respect to Pinterest publishing; never publish a real Pin during tests.
 
@@ -244,12 +205,6 @@ Execution order:
 
 - Amazon Associates policies: https://affiliate-program.amazon.com/help/operating/policies
 - Amazon Associates agreement: https://affiliate-program.amazon.com/help/operating/agreement
-- Amazon Creators API onboarding: https://affiliate-program.amazon.com/creatorsapi/docs/en-us/onboarding
-- Awin Product Feed Publisher Guide: https://help.awin.com/developers/docs/product-feed-publisher-guide-intro
-- Awin Product Feed access: https://success.awin.com/s/article/How-can-I-access-a-Product-Feed?language=en_US
-- CJ Product Feed API Search: https://docs.cj.com/docs/productfeed-api-search
-- eBay Browse API: https://developer.ebay.com/api-docs/buy/api-browse.html
-- impact.com partner catalogs: https://help.impact.com/partner/what-would-you-like-to-learn-about/platform-features/marketing-content/product-marketplace-and-catalogs/download-product-catalogs-as-a-partner
 
 ---
 

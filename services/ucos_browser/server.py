@@ -724,6 +724,79 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                     }))"""
                 )
                 result["links"] = hrefs
+            elif kind == "amazon_search_select":
+                keyword = str(action.get("keyword", "")).strip()
+                if not keyword or len(keyword) > 300:
+                    raise ValueError("amazon_search_select requires a keyword up to 300 characters")
+                host = (urlsplit(page.url).hostname or "").lower().rstrip(".")
+                if host not in {d for d in _AMAZON_MARKETPLACE_DOMAINS} | {"www." + d for d in _AMAZON_MARKETPLACE_DOMAINS}:
+                    raise ValueError("Amazon search must start on the selected Amazon marketplace")
+                search_box = page.locator("input#twotabsearchtextbox").first
+                if not search_box.count() or not search_box.is_visible():
+                    raise ValueError("Amazon search box is unavailable; sign in or resolve the Amazon page manually")
+                search_box.fill(keyword)
+                search_box.press("Enter")
+                _assert_public_page(page)
+                page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                results = page.locator("div[data-component-type='s-search-result'] h2 a[href*='/dp/']")
+                results.first.wait_for(state="visible", timeout=min(timeout, 15000))
+                results.first.click()
+                _assert_public_page(page)
+                selected_host = (urlsplit(page.url).hostname or "").lower().rstrip(".")
+                if selected_host not in {d for d in _AMAZON_MARKETPLACE_DOMAINS} | {"www." + d for d in _AMAZON_MARKETPLACE_DOMAINS}:
+                    raise ValueError("Selected search result did not open an Amazon product page")
+                result["final_url"] = page.url
+                result["events"].append({"type": "amazon_search_and_first_result_selected"})
+            elif kind == "amazon_sitestripe_get_link":
+                # Use the visible Associates SiteStripe controls only. No DOM
+                # product fields are read or returned; capture is limited to
+                # the fresh URL copied by SiteStripe itself.
+                clicked = False
+                for frame in getattr(page, "frames", [page]):
+                    try:
+                        control = frame.locator("#amzn-ss-get-link-button").first
+                        if control.count() and control.is_visible():
+                            control.click(timeout=min(timeout, 5000))
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+                if not clicked:
+                    try:
+                        page.get_by_text("Get Link", exact=True).first.click(timeout=min(timeout, 5000))
+                        clicked = True
+                    except Exception:
+                        pass
+                if not clicked:
+                    raise ValueError("Amazon Associates SiteStripe Get Link control is unavailable; verify Associates sign-in and SiteStripe visibility")
+                page.wait_for_timeout(500)
+                text_option_clicked = False
+                for frame in getattr(page, "frames", [page]):
+                    try:
+                        option = frame.get_by_text("Text", exact=True).first
+                        if option.count() and option.is_visible():
+                            option.click(timeout=min(timeout, 5000))
+                            text_option_clicked = True
+                            break
+                    except Exception:
+                        continue
+                if not text_option_clicked:
+                    raise ValueError("SiteStripe Text link option was not available")
+                page.wait_for_timeout(500)
+                copy_clicked = False
+                for frame in getattr(page, "frames", [page]):
+                    try:
+                        copy = frame.get_by_role("button", name=re.compile("copy link", re.I)).first
+                        if copy.count() and copy.is_visible():
+                            copy.click(timeout=min(timeout, 5000))
+                            copy_clicked = True
+                            break
+                    except Exception:
+                        continue
+                if not copy_clicked:
+                    raise ValueError("SiteStripe Copy Link control was not available")
+                page.wait_for_timeout(250)
+                result["events"].append({"type": "sitestripe_get_link_clicked"})
             elif kind == "amazon_product_details":
                 fields = action.get("fields") or ["title", "price", "rating", "availability"]
                 if not isinstance(fields, list) or len(fields) > 10:
@@ -911,82 +984,34 @@ def _record_task_run(task_id: str, task: dict, state: str, result=None, error=No
 
 
 def _amazon_product_tool_task(payload: dict) -> dict:
-    """Translate one agent tool request into a bounded Amazon browser workflow."""
+    """Search Amazon in the existing profile and return only a SiteStripe URL."""
     marketplace = str(payload.get("marketplace", "amazon.com")).strip().lower()
-    allowed = {domain for domain in _AMAZON_MARKETPLACE_DOMAINS}
-    if marketplace not in allowed:
+    if marketplace not in _AMAZON_MARKETPLACE_DOMAINS:
         raise ValueError("marketplace must be a supported Amazon marketplace domain")
-    product_url = str(payload.get("product_url", "")).strip()
-    if not product_url:
-        raise ValueError("product_url is required")
-    parsed = urlsplit(product_url)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port:
-        raise ValueError("product_url must be a credential-free HTTPS URL on the selected Amazon marketplace")
-    if host not in {marketplace, "www." + marketplace}:
-        if host in {domain for domain in allowed} or host in {"www." + domain for domain in allowed}:
-            raise ValueError("product_url marketplace does not match marketplace")
-        raise ValueError("product_url must be an HTTPS URL on the selected Amazon marketplace")
+    keyword = str(payload.get("keyword", "")).strip()
+    if not keyword or len(keyword) > 300:
+        raise ValueError("keyword is required and must be <= 300 characters")
     profile_ref = payload.get("profile_ref", "amazon-primary")
     if profile_ref != "amazon-primary":
         raise ValueError("this agent tool is restricted to the existing amazon-primary profile")
-
-    requested_fields = payload.get("fields")
-    if requested_fields is None:
-        requested_fields = ["title", "price", "rating", "availability"]
-    if not isinstance(requested_fields, list) or not requested_fields:
-        raise ValueError("fields must be a non-empty list")
-    if any(not isinstance(item, str) or not item.strip() for item in requested_fields):
-        raise ValueError("each requested field must be a non-empty string")
-    requested_fields = requested_fields[:]
-    if len(requested_fields) > 5:
-        raise ValueError("fields may contain at most 5 supported product fields")
-    requested_generate_link = payload.get("generate_affiliate_link", True)
-    if not isinstance(requested_generate_link, bool):
-        raise ValueError("generate_affiliate_link must be a boolean")
-
-    requested_fields = requested_fields or [
-        "title", "price", "rating", "availability"
-    ]
-    supported_fields = {"title", "price", "rating", "availability"}
-    fields = list(dict.fromkeys(item.strip() for item in requested_fields))
-    unknown = sorted(set(fields) - supported_fields)
-    if unknown:
-        raise ValueError("unsupported product fields: " + ", ".join(unknown))
-
-    actions = [
-        {"type": "navigate", "url": product_url},
-        {"type": "amazon_product_details", "fields": fields},
-    ]
-    if requested_generate_link:
-        actions.append({"type": "affiliate_link"})
+    timeout_ms = payload.get("timeout_ms", DEFAULT_TIMEOUT_MS)
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int):
+        raise ValueError("timeout_ms must be an integer")
     raw = execute_task({
         "profile_ref": profile_ref,
-        "timeout_ms": payload.get("timeout_ms", DEFAULT_TIMEOUT_MS),
-        "actions": actions,
+        "timeout_ms": timeout_ms,
+        "actions": [
+            {"type": "navigate", "url": f"https://www.{marketplace}/"},
+            {"type": "amazon_search_select", "keyword": keyword},
+            {"type": "amazon_sitestripe_get_link"},
+            {"type": "affiliate_link"},
+        ],
     })
-    details = raw.get("product") or {}
-    missing_fields = [field for field, value in details.items() if value is None]
-    affiliate_link = raw.get("affiliate_link")
-    affiliate_format_valid = bool(affiliate_link and _is_amazon_affiliate_link(affiliate_link))
-    if requested_generate_link and not affiliate_format_valid:
-        missing_fields.append("affiliate_link")
-    complete = not missing_fields
-    return {
-        "status": "completed" if complete else "partial",
-        "product": details,
-        "affiliate_link": affiliate_link if affiliate_format_valid else None,
-        "affiliate_link_format_valid": affiliate_format_valid,
-        "affiliate_link_verification_scope": "format_only; redirect_destination_and_associates_account_not_verified",
-        "missing_fields": missing_fields,
-        "source_url": raw.get("final_url"),
-        "verified_at": raw.get("verified_at"),
-        "profile_ref": raw.get("profile_ref"),
-        "session_reused": raw.get("session_reused"),
-        "duration_ms": raw.get("duration_ms"),
-        "evidence": raw.get("evidence", {}),
-        "warnings": raw.get("warnings", []),
-    }
+    affiliate_url = raw.get("affiliate_link")
+    if not affiliate_url or not _is_amazon_affiliate_link(affiliate_url):
+        raise ValueError("SiteStripe did not return a valid Amazon Associates affiliate URL")
+    # Deliberately return no product title, metadata, result list, or page content.
+    return {"affiliate_url": affiliate_url}
 
 def _authorized(headers, token_env: str = "UCOS_BROWSER_TOKEN") -> bool:
     """Authorize one explicitly scoped bearer token using constant-time comparison."""
@@ -1101,7 +1126,7 @@ class Handler(BaseHTTPRequestHandler):
             if not approved or not agent_ua:
                 self._send(403, {
                     "state": "blocked",
-                    "error": "live Amazon agent access requires documented policy approval and an explicit Agent/UCOSPersonalBrowser User-Agent",
+                    "error": "Amazon agent access is disabled until explicitly enabled and an Agent/UCOSPersonalBrowser User-Agent is configured",
                 })
                 return
         task_id = uuid.uuid4().hex
