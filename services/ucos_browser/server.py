@@ -1267,6 +1267,15 @@ class Handler(BaseHTTPRequestHandler):
             duration_ms = int((time.monotonic() - started) * 1000)
             if isinstance(payload, dict):
                 _record_task_run(task_id, payload, "rejected", error=exc, duration_ms=duration_ms)
+            # Amazon's human-visible workflow can be rejected at several stages
+            # (search results, product navigation, or SiteStripe). Log only the
+            # bounded, code-authored rejection reason: never log request payloads,
+            # cookies, page text, URLs, or authentication material.
+            if route == "/tool/amazon/product":
+                LOG.warning(
+                    "Amazon browser task rejected reason=%s",
+                    str(exc).replace("\\n", " ")[:240],
+                )
             self._send(400, {"state": "rejected", "task_id": task_id, "error": str(exc)})
         except Exception as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
