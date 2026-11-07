@@ -192,3 +192,35 @@ def test_amazon_product_result_locator_rejects_non_product_and_unlabelled_links(
             return Matches() if selector == "h2 a[href*='/dp/']" else Empty()
 
     assert _amazon_product_result_locator(Page()) is None
+
+
+def test_amazon_product_result_url_resolves_and_scopes_to_marketplace():
+    from services.ucos_browser.server import _amazon_product_result_url
+
+    url = _amazon_product_result_url(
+        "https://www.amazon.com/s?k=drawer+organizer",
+        "/brand/product/dp/B012345678/ref=sr_1_1",
+        "amazon.com",
+    )
+    assert url == "https://www.amazon.com/brand/product/dp/B012345678/ref=sr_1_1"
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://attacker.example/dp/B012345678",
+        "http://www.amazon.com/dp/B012345678",
+        "https://www.amazon.co.uk/dp/B012345678",
+        "https://user@www.amazon.com/dp/B012345678",
+        "/help/contact-us",
+    ],
+)
+def test_amazon_product_result_url_rejects_unsafe_or_cross_marketplace_hrefs(href):
+    from services.ucos_browser.server import _amazon_product_result_url
+
+    with pytest.raises(ValueError, match="safe product URL"):
+        _amazon_product_result_url(
+            "https://www.amazon.com/s?k=drawer+organizer",
+            href,
+            "amazon.com",
+        )
