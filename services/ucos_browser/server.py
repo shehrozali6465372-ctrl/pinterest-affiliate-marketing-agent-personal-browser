@@ -663,7 +663,7 @@ def _get_browser_runtime(profile_ref: str, timeout: int) -> tuple[dict, bool]:
             # If the Amazon agent route is ever approved, every browser HTTP(S)
             # request must visibly identify this agent per Amazon Agent Terms.
             agent_ua = _amazon_agent_user_agent()
-            if agent_ua:
+            if profile_ref == "amazon-agent" and agent_ua:
                 context_options["user_agent"] = agent_ua
             context = pw.chromium.launch_persistent_context(**context_options)
             if saved_state:
