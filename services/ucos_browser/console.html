@@ -87,7 +87,7 @@ details{border-top:1px solid var(--line);margin-top:14px;padding-top:12px}summar
 </main>
 <script>
 const $=id=>document.getElementById(id);const key='ucos_browser_console_token';$('token').value=sessionStorage.getItem(key)||'';
-$('profileRef').addEventListener('change',()=>{const agent=$('profileRef').value==='amazon-agent';$('profileNote').textContent=agent?'Agent profile selected. Human operator may complete sign-in here; agent API remains restricted to its own Amazon workflow.':'Human profile selected. This is the existing human browser session.';$('affiliateLinkOutput').value='';$('copyAffiliateLinkButton').disabled=true;remoteFocusKey='';remoteTypingSent='';});
+$('profileRef').addEventListener('change',()=>{const agent=$('profileRef').value==='amazon-agent';$('profileNote').textContent=agent?'Agent profile selected. Human operator may complete sign-in here; agent API remains restricted to its own Amazon workflow.':'Human profile selected. This is the existing human browser session.';$('affiliateLinkOutput').value='';$('copyAffiliateLinkButton').disabled=true;remoteFocusKey='';remoteTypingSent='';remoteFocusPending=false;$('remoteTyping').hidden=true;$('remoteInput').blur();});
 function headers(){const t=$('token').value.trim();if(!t)throw Error('Open Advanced controls and enter the existing UCOS Browser Token. Do not use your Amazon password here.');sessionStorage.setItem(key,t);return {'Authorization':'Bearer '+t,'Content-Type':'application/json'}}
 async function task(actions){const r=await fetch('/execute',{method:'POST',headers:headers(),body:JSON.stringify({profile_ref:$('profileRef').value,url:$('url').value.trim(),actions})});let x;try{x=await r.json()}catch{x={error:'The browser service returned an unreadable response.'}}const safe=JSON.parse(JSON.stringify(x));const sr=safe?.result;if(sr){if(sr.screenshot)sr.screenshot='[PNG rendered in browser view; omitted from diagnostics]';if(typeof sr.text==='string'&&sr.text.length>12000)sr.text=sr.text.slice(0,12000)+'\\n[truncated in diagnostics; '+sr.text.length+' total characters]';if(Array.isArray(sr.links)){sr.links_count=sr.links.length;sr.links='[omitted from diagnostics; use extracted page details]'}}$('result').textContent=JSON.stringify(safe,null,2);if(r.status===401)throw Error('Authentication required: UCOS Browser Token does not match the Render service token. Check the existing value in Render; do not change Amazon credentials.');if(!r.ok)throw Error(x.error||'Browser request failed ('+r.status+').');return x}
 let viewportSize={width:1280,height:720};
@@ -135,6 +135,7 @@ function show(x){
      // must release the local mobile input and dismiss the Android keyboard.
      const input=$('remoteInput');
      if(document.activeElement===input)input.blur();
+     remoteFocusPending=false;
    }
  }
  if(r.final_url){
