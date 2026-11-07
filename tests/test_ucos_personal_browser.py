@@ -202,7 +202,7 @@ def test_screen_click_uses_validated_viewport_coordinates(monkeypatch):
 
     assert page.mouse.calls == [("click", 120, 80)]
     assert result["viewport"] == {"width": 640, "height": 480}
-    assert "focused" not in result
+    assert result["focused"]["editable"] is True
     assert result["screenshot"] == b"png".hex()
 
 
@@ -258,11 +258,12 @@ def test_screen_click_does_not_wait_for_optional_focus_metadata(monkeypatch):
         ],
     })
 
-    # The click path must not execute a renderer round-trip for optional
-    # focus metadata; a click can coincide with document navigation.
+    # Focus metadata is best-effort: navigation destroys the execution context,
+    # but the click remains successful and the console can still dismiss its keyboard.
     assert page.mouse.calls == [("click", 200, 120)]
     assert result["events"][0]["type"] == "click_at"
-    assert "focused" not in result
+    assert result["focused"]["editable"] is False
+    assert result["focused"]["unavailable"] is True
     assert result["screenshot"] == b"png".hex()
 
 
