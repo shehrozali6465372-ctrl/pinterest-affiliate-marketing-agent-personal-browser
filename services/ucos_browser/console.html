@@ -36,7 +36,7 @@ details{border-top:1px solid var(--line);margin-top:14px;padding-top:12px}summar
     <button class="primary" id="go" onclick="navigateAddress()">Go</button>
   </div>
   <div class="tabs"><button class="tab active" id="tabLabel">Tab 1 · Amazon</button><button class="tab" onclick="newTab()">＋ New tab</button><button class="tab" onclick="listTabs()">Show tabs</button></div>
-  <p class="note">Profile: <strong>amazon-primary</strong> · CAPTCHA and two-factor verification must be completed by you.</p>
+  <div class="note"><label for="profileRef">Human operator profile</label><select id="profileRef" aria-label="Human operator profile" style="width:100%;max-width:420px"><option value="amazon-primary">amazon-primary · existing human session</option><option value="amazon-agent">amazon-agent · agent session setup / review</option></select><span id="profileNote">Human-controlled browser. CAPTCHA and two-factor verification must be completed by you.</span></div>
 </section>
 <section class="panel">
   <div class="browser-view" id="browserView"><div class="empty"><strong>Your browser is ready</strong>Press Go to open Amazon in the remote browser. If a direct sign-in URL returns 404, UCOS will retry Amazon Home.</div></div>
@@ -88,7 +88,7 @@ details{border-top:1px solid var(--line);margin-top:14px;padding-top:12px}summar
 <script>
 const $=id=>document.getElementById(id);const key='ucos_browser_console_token';$('token').value=sessionStorage.getItem(key)||'';
 function headers(){const t=$('token').value.trim();if(!t)throw Error('Open Advanced controls and enter the existing UCOS Browser Token. Do not use your Amazon password here.');sessionStorage.setItem(key,t);return {'Authorization':'Bearer '+t,'Content-Type':'application/json'}}
-async function task(actions){const r=await fetch('/execute',{method:'POST',headers:headers(),body:JSON.stringify({profile_ref:'amazon-primary',url:$('url').value.trim(),actions})});let x;try{x=await r.json()}catch{x={error:'The browser service returned an unreadable response.'}}const safe=JSON.parse(JSON.stringify(x));const sr=safe?.result;if(sr){if(sr.screenshot)sr.screenshot='[PNG rendered in browser view; omitted from diagnostics]';if(typeof sr.text==='string'&&sr.text.length>12000)sr.text=sr.text.slice(0,12000)+'\\n[truncated in diagnostics; '+sr.text.length+' total characters]';if(Array.isArray(sr.links)){sr.links_count=sr.links.length;sr.links='[omitted from diagnostics; use extracted page details]'}}$('result').textContent=JSON.stringify(safe,null,2);if(r.status===401)throw Error('Authentication required: UCOS Browser Token does not match the Render service token. Check the existing value in Render; do not change Amazon credentials.');if(!r.ok)throw Error(x.error||'Browser request failed ('+r.status+').');return x}
+async function task(actions){const r=await fetch('/execute',{method:'POST',headers:headers(),body:JSON.stringify({profile_ref:$('profileRef').value,url:$('url').value.trim(),actions})});let x;try{x=await r.json()}catch{x={error:'The browser service returned an unreadable response.'}}const safe=JSON.parse(JSON.stringify(x));const sr=safe?.result;if(sr){if(sr.screenshot)sr.screenshot='[PNG rendered in browser view; omitted from diagnostics]';if(typeof sr.text==='string'&&sr.text.length>12000)sr.text=sr.text.slice(0,12000)+'\\n[truncated in diagnostics; '+sr.text.length+' total characters]';if(Array.isArray(sr.links)){sr.links_count=sr.links.length;sr.links='[omitted from diagnostics; use extracted page details]'}}$('result').textContent=JSON.stringify(safe,null,2);if(r.status===401)throw Error('Authentication required: UCOS Browser Token does not match the Render service token. Check the existing value in Render; do not change Amazon credentials.');if(!r.ok)throw Error(x.error||'Browser request failed ('+r.status+').');return x}
 let viewportSize={width:1280,height:720};
 function show(x){
  const r=x?.result||{};
@@ -130,6 +130,11 @@ function show(x){
      if(document.activeElement!==input)input.focus({preventScroll:true});
    }else{
      remoteFocusKey='';
+     // A tap on a non-editable page control (e.g. Amazon cart or SiteStripe)
+     // must release the local mobile input and dismiss the Android keyboard.
+     const input=$('remoteInput');
+     if(document.activeElement===input)input.blur();
+     remoteTypingPending=false;
    }
  }
  if(r.final_url){
@@ -142,7 +147,7 @@ function show(x){
  if(r.tabs)$('elements').textContent=JSON.stringify(r.tabs,null,2);
 }
 let pointerStart=null,wheelX=0,wheelY=0,wheelTimer=null;
-let remoteFocusKey='',remoteTypingSent='',remoteTypingTimer=null,remoteFocusPending=false;
+let remoteFocusKey='',remoteTypingSent='',remoteTypingTimer=null,remoteFocusPending=false,remoteTypingPending=false;
 let remoteTypingQueue=Promise.resolve();
 function screenGeometry(img){
  const rect=img.getBoundingClientRect(),nw=img.naturalWidth||viewportSize.width,nh=img.naturalHeight||viewportSize.height;
