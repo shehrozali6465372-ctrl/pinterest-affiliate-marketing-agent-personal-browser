@@ -189,46 +189,120 @@ def _amazon_verification_challenge(page) -> bool:
     return any(marker in title or marker in body for marker in markers)
 
 
+def _visible_text_control(frame, pattern):
+    """Return a visible link/button/text control matching a concise label."""
+    candidates = []
+    for role in ("button", "link"):
+        try:
+            candidates.append(frame.get_by_role(role, name=pattern).first)
+        except Exception:
+            pass
+    try:
+        candidates.append(frame.get_by_text(pattern).first)
+    except Exception:
+        pass
+    try:
+        candidates.append(
+            frame.locator("button, a, [role='button']").filter(has_text=pattern).first
+        )
+    except Exception:
+        pass
+    for control in candidates:
+        try:
+            if control.count() and control.is_visible():
+                return control
+        except Exception:
+            continue
+    return None
+
+
 def _click_sitestripe_get_link(page, timeout: int) -> bool:
-    """Click the visible SiteStripe Get Link control, including inside its iframe.
-
-    Amazon may render SiteStripe controls in a child frame. Search each frame
-    with semantic selectors as well as the historical ID selector; never click
-    a hidden or unrelated control.
-    """
-    frames = getattr(page, "frames", None)
-    candidates = list(frames) if frames else [page]
-    if page not in candidates:
-        candidates.insert(0, page)
-
-    exact_name = re.compile(r"^\s*get\s*link\s*$", re.I)
-    for frame in candidates:
-        locators = []
+    """Click a visible SiteStripe Get Link control in any page/frame."""
+    frames = list(getattr(page, "frames", None) or [])
+    if page not in frames:
+        frames.insert(0, page)
+    pattern = re.compile(r"get\s*link", re.I)
+    for frame in frames:
+        candidates = []
         try:
-            locators.append(frame.locator("#amzn-ss-get-link-button").first)
+            candidates.append(frame.locator("#amzn-ss-get-link-button").first)
         except Exception:
             pass
         try:
-            locators.append(frame.get_by_role("button", name=exact_name).first)
+            control = _visible_text_control(frame, pattern)
+            if control is not None:
+                candidates.append(control)
         except Exception:
             pass
-        try:
-            locators.append(frame.get_by_text(exact_name).first)
-        except Exception:
-            pass
-        try:
-            locators.append(frame.locator("button").filter(has_text=exact_name).first)
-        except Exception:
-            pass
-
-        for control in locators:
+        # SiteStripe can hydrate after the product page's DOMContentLoaded event.
+        for control in candidates:
             try:
-                if control.count() and control.is_visible():
-                    control.click(timeout=min(timeout, 5000))
-                    return True
+                if control.count():
+                    try:
+                        control.wait_for(state="visible", timeout=min(max(timeout, 1000), 3000))
+                    except Exception:
+                        pass
+                    if control.is_visible():
+                        control.click(timeout=min(timeout, 5000))
+                        return True
             except Exception:
                 continue
     return False
+
+
+def _click_sitestripe_option(page, label: str, timeout: int) -> bool:
+    """Click a visible SiteStripe menu option by its accessible/text label."""
+    pattern = re.compile(re.escape(label), re.I)
+    frames = list(getattr(page, "frames", None) or [])
+    if page not in frames:
+        frames.insert(0, page)
+    for frame in frames:
+        control = _visible_text_control(frame, pattern)
+        if control is None:
+            continue
+        try:
+            control.click(timeout=min(timeout, 5000))
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _sitestripe_control_diagnostics(page) -> dict:
+    """Return only sanitized visible Get-Link control metadata, never page content."""
+    summary = []
+    frames = list(getattr(page, "frames", None) or [])
+    if page not in frames:
+        frames.insert(0, page)
+    for index, frame in enumerate(frames[:12]):
+        item = {"frame_index": index, "url_host": ""}
+        try:
+            item["url_host"] = (urlsplit(str(frame.url)).hostname or "")[:120]
+        except Exception:
+            pass
+        try:
+            matches = frame.locator("button, a, [role='button'], [aria-label], [title]").evaluate_all(
+                """els => els.slice(0, 300).map(e => {
+                    const text = String(e.innerText || e.textContent || '').trim().slice(0, 100);
+                    const aria = String(e.getAttribute('aria-label') || '').slice(0, 100);
+                    const title = String(e.getAttribute('title') || '').slice(0, 100);
+                    const id = String(e.id || '').slice(0, 100);
+                    const all = [text, aria, title, id].join(' ');
+                    if (!/get\s*link/i.test(all)) return null;
+                    const r = e.getBoundingClientRect();
+                    const style = getComputedStyle(e);
+                    return {
+                        tag: e.tagName.toLowerCase(), id, role: e.getAttribute('role') || '',
+                        aria_label: aria, title, text,
+                        visible: !!(r.width && r.height) && style.visibility !== 'hidden' && style.display !== 'none'
+                    };
+                }).filter(Boolean).slice(0, 12)"""
+            )
+            item["get_link_controls"] = matches
+        except Exception as exc:
+            item["inspect_error"] = type(exc).__name__
+        summary.append(item)
+    return {"frame_count": len(frames), "frames": summary}
 
 
 def _amazon_product_result_locator(page):
@@ -242,6 +316,14 @@ def _amazon_product_result_locator(page):
         "a[href*='/dp/'][data-asin]",
         "div[data-component-type='s-search-result'] a[href*='/dp/']:not([aria-hidden='true'])",
     )
+    # Amazon search results are hydrated after DOMContentLoaded on some sessions.
+    # Wait once for the common title-link shape, then inspect the bounded fallback set.
+    try:
+        page.locator("h2 a[href*='/dp/']").first.wait_for(
+            state="visible", timeout=min(12_000, max(1_000, page.timeout if hasattr(page, "timeout") else 12_000))
+        )
+    except Exception:
+        pass
     for selector in selectors:
         try:
             matches = page.locator(selector)
@@ -362,6 +444,26 @@ _AFFILIATE_CLIPBOARD_CAPTURE_SCRIPT = r"""
   } catch (_) {}
 })();
 """
+
+
+def _wait_for_render(page, timeout_ms: int = 8_000) -> None:
+    """Wait briefly for navigation paint without requiring network-idle on retail pages."""
+    budget = max(0, min(int(timeout_ms), 10_000))
+    if budget:
+        try:
+            page.wait_for_load_state("load", timeout=budget)
+        except Exception:
+            # Amazon keeps analytics/personalization requests alive; load-state
+            # timeout is a hint, not a failed navigation.
+            pass
+        try:
+            page.wait_for_function(
+                "() => document.readyState === 'complete' && !!document.body",
+                timeout=min(1_500, budget),
+            )
+        except Exception:
+            pass
+    page.wait_for_timeout(150)
 
 
 def _focused_element_state(page) -> dict:
@@ -519,6 +621,13 @@ def _amazon_agent_user_agent() -> str | None:
     return value
 
 
+def _profile_user_agent(profile_ref: str) -> str | None:
+    """Apply the declared agent identity only to the isolated agent profile."""
+    if profile_ref != "amazon-agent":
+        return None
+    return _amazon_agent_user_agent()
+
+
 def _close_browser_runtime_locked() -> None:
     global _BROWSER_RUNTIME
     runtime = _BROWSER_RUNTIME
@@ -580,7 +689,7 @@ def _get_browser_runtime(profile_ref: str, timeout: int) -> tuple[dict, bool]:
             }
             # If the Amazon agent route is ever approved, every browser HTTP(S)
             # request must visibly identify this agent per Amazon Agent Terms.
-            agent_ua = _amazon_agent_user_agent()
+            agent_ua = _profile_user_agent(profile_ref)
             if agent_ua:
                 context_options["user_agent"] = agent_ua
             context = pw.chromium.launch_persistent_context(**context_options)
@@ -738,6 +847,9 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                 # the clicked page is navigating.
                 page.mouse.click(x, y)
                 result["viewport"] = {"width": width, "height": height}
+                # Best-effort focus metadata lets the mobile console close its
+                # soft keyboard after taps on non-editable page controls.
+                result["focused"] = _focused_element_state(page)
                 result["events"].append({
                     "type": "click_at", "x": round(x, 2), "y": round(y, 2)
                 })
@@ -806,6 +918,10 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
             elif kind == "wait":
                 ms = max(0, min(int(action.get("ms", 250)), 10_000))
                 page.wait_for_timeout(ms)
+            elif kind == "wait_for_render":
+                wait_ms = max(0, min(int(action.get("timeout_ms", 8_000)), 10_000))
+                _wait_for_render(page, wait_ms)
+                result["events"].append({"type": "wait_for_render", "timeout_ms": wait_ms})
             elif kind == "press":
                 selector = str(action.get("selector", "")).strip()
                 key = str(action.get("key", "")).strip()
@@ -915,32 +1031,30 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                 # product fields are read or returned; capture is limited to
                 # the fresh URL copied by SiteStripe itself.
                 if not _click_sitestripe_get_link(page, timeout):
-                    raise ValueError("Amazon Associates SiteStripe Get Link control is unavailable; verify Associates sign-in and SiteStripe visibility")
+                    diagnostic = _sitestripe_control_diagnostics(page)
+                    LOG.warning(
+                        "Amazon SiteStripe Get Link not located profile_ref=%s diagnostic=%s",
+                        profile_ref,
+                        json.dumps(diagnostic, separators=(",", ":"))[:5000],
+                    )
+                    raise ValueError("Amazon product page loaded but the visible SiteStripe Get Link control could not be located; inspect the sanitized frame diagnostic")
                 page.wait_for_timeout(500)
-                text_option_clicked = False
-                for frame in getattr(page, "frames", [page]):
-                    try:
-                        option = frame.get_by_text("Text", exact=True).first
-                        if option.count() and option.is_visible():
-                            option.click(timeout=min(timeout, 5000))
-                            text_option_clicked = True
-                            break
-                    except Exception:
-                        continue
-                if not text_option_clicked:
+                if not _click_sitestripe_option(page, "Text", timeout):
+                    diagnostic = _sitestripe_control_diagnostics(page)
+                    LOG.warning(
+                        "Amazon SiteStripe Text option not located profile_ref=%s diagnostic=%s",
+                        profile_ref,
+                        json.dumps(diagnostic, separators=(",", ":"))[:5000],
+                    )
                     raise ValueError("SiteStripe Text link option was not available")
                 page.wait_for_timeout(500)
-                copy_clicked = False
-                for frame in getattr(page, "frames", [page]):
-                    try:
-                        copy = frame.get_by_role("button", name=re.compile("copy link", re.I)).first
-                        if copy.count() and copy.is_visible():
-                            copy.click(timeout=min(timeout, 5000))
-                            copy_clicked = True
-                            break
-                    except Exception:
-                        continue
-                if not copy_clicked:
+                if not _click_sitestripe_option(page, "Copy Link", timeout):
+                    diagnostic = _sitestripe_control_diagnostics(page)
+                    LOG.warning(
+                        "Amazon SiteStripe Copy Link control not located profile_ref=%s diagnostic=%s",
+                        profile_ref,
+                        json.dumps(diagnostic, separators=(",", ":"))[:5000],
+                    )
                     raise ValueError("SiteStripe Copy Link control was not available")
                 page.wait_for_timeout(250)
                 result["events"].append({"type": "sitestripe_get_link_clicked"})
@@ -1138,9 +1252,9 @@ def _amazon_product_tool_task(payload: dict) -> dict:
     keyword = str(payload.get("keyword", "")).strip()
     if not keyword or len(keyword) > 300:
         raise ValueError("keyword is required and must be <= 300 characters")
-    profile_ref = payload.get("profile_ref", "amazon-primary")
-    if profile_ref != "amazon-primary":
-        raise ValueError("this agent tool is restricted to the existing amazon-primary profile")
+    profile_ref = payload.get("profile_ref", "amazon-agent")
+    if profile_ref != "amazon-agent":
+        raise ValueError("this agent tool is restricted to the isolated amazon-agent profile")
     timeout_ms = payload.get("timeout_ms", DEFAULT_TIMEOUT_MS)
     if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int):
         raise ValueError("timeout_ms must be an integer")
@@ -1301,7 +1415,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/tool/amazon/product":
                 result = _amazon_product_tool_task(payload)
                 audit_task = {
-                    "profile_ref": result.get("profile_ref", "amazon-primary"),
+                    "profile_ref": "amazon-agent",
                     "url": result.get("source_url", payload.get("product_url", "")),
                 }
                 duration_ms = int((time.monotonic() - started) * 1000)

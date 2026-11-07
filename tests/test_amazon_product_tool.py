@@ -5,8 +5,10 @@ def test_amazon_agent_tool_requires_keyword_and_existing_profile():
     from services.ucos_browser.server import _amazon_product_tool_task
     with pytest.raises(ValueError, match="keyword is required"):
         _amazon_product_tool_task({})
-    with pytest.raises(ValueError, match="existing amazon-primary profile"):
+    with pytest.raises(ValueError, match="isolated amazon-agent profile"):
         _amazon_product_tool_task({"keyword": "spice rack", "profile_ref": "other"})
+    with pytest.raises(ValueError, match="isolated amazon-agent profile"):
+        _amazon_product_tool_task({"keyword": "spice rack", "profile_ref": "amazon-primary"})
     with pytest.raises(ValueError, match="supported Amazon marketplace"):
         _amazon_product_tool_task({"keyword": "spice rack", "marketplace": "shop.example"})
 
@@ -21,7 +23,7 @@ def test_amazon_agent_tool_runs_search_select_sitestripe_and_returns_url_only(mo
     monkeypatch.setattr(server, "execute_task", fake_execute)
     result = server._amazon_product_tool_task({"keyword": "3 tier spice rack"})
     assert result == {"affiliate_url": url}
-    assert captured["profile_ref"] == "amazon-primary"
+    assert captured["profile_ref"] == "amazon-agent"
     assert [a["type"] for a in captured["actions"]] == [
         "navigate", "amazon_search_select", "amazon_sitestripe_get_link", "affiliate_link"
     ]
@@ -313,3 +315,13 @@ def test_amazon_search_select_navigates_to_validated_product_href_without_click(
     assert page.click_calls == 0
     assert result["final_url"] == page.url
     assert result["events"][-1]["type"] == "amazon_search_and_first_result_selected"
+
+
+
+def test_agent_user_agent_is_scoped_to_agent_profile(monkeypatch):
+    from services.ucos_browser.server import _profile_user_agent
+
+    configured = "Mozilla/5.0 Agent/UCOSPersonalBrowser"
+    monkeypatch.setenv("UCOS_AMAZON_AGENT_USER_AGENT", configured)
+    assert _profile_user_agent("amazon-primary") is None
+    assert _profile_user_agent("amazon-agent") == configured
