@@ -3,6 +3,7 @@ import pytest
 from services.ucos_browser.server import (
     _AFFILIATE_CLIPBOARD_CAPTURE_SCRIPT,
     _AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT,
+    _click_sitestripe_get_link,
     _is_amazon_affiliate_link,
     validate_url,
 )
@@ -378,3 +379,53 @@ def test_affiliate_candidate_rejects_missing_or_non_numeric_timestamp():
                 assert page.evaluate(_AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT) == []
         finally:
             browser.close()
+
+
+
+class _FakeSiteStripeLocator:
+    def __init__(self, visible=False):
+        self.visible = visible
+        self.clicked = False
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1 if self.visible else 0
+
+    def is_visible(self):
+        return self.visible
+
+    def click(self, **_kwargs):
+        self.clicked = True
+
+
+class _FakeSiteStripeFrame:
+    def __init__(self, exposes_role_button=False):
+        self.role_locator = _FakeSiteStripeLocator(exposes_role_button)
+
+    def locator(self, _selector):
+        return _FakeSiteStripeLocator(False)
+
+    def get_by_role(self, _role, name=None):
+        return self.role_locator
+
+    def get_by_text(self, _text):
+        return _FakeSiteStripeLocator(False)
+
+
+class _FakeSiteStripePage(_FakeSiteStripeFrame):
+    def __init__(self, frames):
+        super().__init__(False)
+        self.frames = frames
+
+
+def test_sitestripe_get_link_is_found_in_child_frame_by_accessible_name():
+    main_frame = _FakeSiteStripeFrame()
+    sitestripe_frame = _FakeSiteStripeFrame(exposes_role_button=True)
+    page = _FakeSiteStripePage([main_frame, sitestripe_frame])
+
+    assert _click_sitestripe_get_link(page, timeout=30_000) is True
+    assert sitestripe_frame.role_locator.clicked is True
+    assert main_frame.role_locator.clicked is False
