@@ -20,7 +20,7 @@ import re
 import uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 try:
     from . import profile_persistence
@@ -148,6 +148,27 @@ def _amazon_search_url(marketplace: str, keyword: str) -> str:
     if host not in _AMAZON_MARKETPLACE_DOMAINS:
         raise ValueError("unsupported Amazon marketplace")
     return f"https://www.{host}/s?{urlencode({'k': keyword})}"
+
+
+def _amazon_product_result_url(current_url: str, href: str, marketplace: str) -> str:
+    """Resolve and strictly validate a product-card href before direct navigation."""
+    expected_marketplace = marketplace.lower().strip()
+    if expected_marketplace not in _AMAZON_MARKETPLACE_DOMAINS:
+        raise ValueError("unsupported Amazon marketplace")
+    target = urljoin(str(current_url or ""), str(href or "").strip())
+    parsed = urlsplit(target)
+    allowed_hosts = {expected_marketplace, "www." + expected_marketplace}
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or host not in allowed_hosts
+        or parsed.username
+        or parsed.password
+        or parsed.port
+        or "/dp/" not in parsed.path
+    ):
+        raise ValueError("Amazon search result did not contain a safe product URL for the selected marketplace")
+    return target
 
 
 def _amazon_verification_challenge(page) -> bool:
@@ -826,11 +847,25 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                         "Amazon search page loaded but no visible product card matched supported layouts; "
                         "manual verification may be required or Amazon markup may have changed"
                     )
-                product_link.click(timeout=min(timeout, 10_000))
+                product_href = str(product_link.get_attribute("href") or "")
+                product_url = _amazon_product_result_url(page.url, product_href, marketplace)
+                response = page.goto(
+                    product_url,
+                    wait_until="domcontentloaded",
+                    timeout=timeout,
+                )
                 _assert_public_page(page)
                 selected_host = (urlsplit(page.url).hostname or "").lower().rstrip(".")
-                if selected_host not in {d for d in _AMAZON_MARKETPLACE_DOMAINS} | {"www." + d for d in _AMAZON_MARKETPLACE_DOMAINS}:
-                    raise ValueError("Selected search result did not open an Amazon product page")
+                if selected_host not in {marketplace, "www." + marketplace}:
+                    raise ValueError("Selected search result did not open a product on the selected Amazon marketplace")
+                if response and response.status in {403, 429, 503}:
+                    raise ValueError(
+                        "Amazon temporarily rejected the product page request; retry later or verify the account manually"
+                    )
+                if _amazon_verification_challenge(page):
+                    raise ValueError(
+                        "Amazon requires human verification on the product page; no automated bypass was attempted"
+                    )
                 result["final_url"] = page.url
                 result["events"].append({"type": "amazon_search_and_first_result_selected"})
             elif kind == "amazon_sitestripe_get_link":
