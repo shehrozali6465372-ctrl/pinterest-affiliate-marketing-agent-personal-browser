@@ -224,3 +224,92 @@ def test_amazon_product_result_url_rejects_unsafe_or_cross_marketplace_hrefs(hre
             href,
             "amazon.com",
         )
+
+
+def test_amazon_search_select_navigates_to_validated_product_href_without_click(monkeypatch):
+    from services.ucos_browser import server
+
+    class Response:
+        status = 200
+
+    class Candidate:
+        def __init__(self, page):
+            self.page = page
+        def is_visible(self):
+            return True
+        def get_attribute(self, name):
+            return {
+                "aria-hidden": None,
+                "href": "/brand/product/dp/B012345678/ref=sr_1_1",
+            }.get(name)
+        def inner_text(self, timeout):
+            assert timeout == 1_000
+            return "3-Tier Spice Rack Organizer"
+        def click(self, *args, **kwargs):
+            self.page.click_calls += 1
+            raise AssertionError("Amazon product result should be navigated by validated href")
+
+    class Matches:
+        def __init__(self, candidate):
+            self.candidate = candidate
+        def count(self):
+            return 1
+        def nth(self, index):
+            assert index == 0
+            return self.candidate
+
+    class Empty:
+        def count(self):
+            return 0
+
+    class Page:
+        def __init__(self):
+            self.url = "https://www.amazon.com/"
+            self.goto_calls = []
+            self.click_calls = 0
+            self.candidate = Candidate(self)
+        def goto(self, url, *, wait_until, timeout):
+            assert wait_until == "domcontentloaded"
+            assert timeout == 30_000
+            self.goto_calls.append(url)
+            self.url = url
+            return Response()
+        def wait_for_load_state(self, state, *, timeout):
+            assert state == "domcontentloaded"
+            assert timeout == 30_000
+        def locator(self, selector):
+            if selector == "div[data-component-type='s-search-result'] h2 a[href*='/dp/']":
+                return Matches(self.candidate)
+            return Empty()
+
+    page = Page()
+    runtime = {
+        "page": page,
+        "context": type("Context", (), {"pages": [page]})(),
+        "state_store_enabled": False,
+        "disk_persistent": False,
+        "persistent_profile": False,
+        "profile_persistence_backend": "test",
+        "last_used": 0,
+    }
+    monkeypatch.setattr(server, "_get_browser_runtime", lambda *args: (runtime, False))
+    monkeypatch.setattr(server, "validate_url", lambda value: str(value))
+    monkeypatch.setattr(server, "_assert_public_page", lambda _page: None)
+    monkeypatch.setattr(server, "_amazon_verification_challenge", lambda _page: False)
+
+    result = server._execute_task_on_browser_thread({
+        "profile_ref": "amazon-primary",
+        "timeout_ms": 30_000,
+        "actions": [
+            {"type": "navigate", "url": "https://www.amazon.com/s?k=drawer+organizer"},
+            {"type": "amazon_search_select", "keyword": "drawer organizer"},
+        ],
+    })
+
+    assert page.goto_calls == [
+        "https://www.amazon.com/s?k=drawer+organizer",
+        "https://www.amazon.com/brand/product/dp/B012345678/ref=sr_1_1",
+    ]
+    assert page.click_calls == 0
+    assert result["final_url"] == page.url
+    assert result["events"][-1]["type"] == "amazon_search_and_first_result_selected"
