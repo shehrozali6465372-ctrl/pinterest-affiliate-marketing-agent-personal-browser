@@ -430,3 +430,26 @@ def test_sitestripe_get_link_is_found_in_child_frame_by_accessible_name():
     assert _click_sitestripe_get_link(page, timeout=30_000) is True
     assert sitestripe_frame.role_locator.clicked is True
     assert main_frame.role_locator.clicked is False
+
+
+
+def test_wait_for_render_uses_bounded_load_and_render_waits():
+    from services.ucos_browser.server import _wait_for_render
+
+    class Page:
+        def __init__(self):
+            self.calls = []
+        def wait_for_load_state(self, state, timeout):
+            self.calls.append(("load", state, timeout))
+            raise TimeoutError("page keeps network activity open")
+        def wait_for_function(self, expression, timeout):
+            self.calls.append(("ready", expression, timeout))
+        def wait_for_timeout(self, ms):
+            self.calls.append(("paint", ms))
+
+    page = Page()
+    _wait_for_render(page, 20_000)
+    assert page.calls[0] == ("load", "load", 10_000)
+    assert page.calls[1][0] == "ready"
+    assert page.calls[1][2] == 1_500
+    assert page.calls[2] == ("paint", 150)
