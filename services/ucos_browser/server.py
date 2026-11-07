@@ -20,7 +20,7 @@ import re
 import uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 try:
     from . import profile_persistence
@@ -140,6 +140,56 @@ def _is_amazon_affiliate_link(value: str) -> bool:
         return is_marketplace and any(str(tag).strip() for tag in tags)
     except (TypeError, ValueError):
         return False
+
+
+def _amazon_search_url(marketplace: str, keyword: str) -> str:
+    """Build a same-marketplace Amazon search URL without relying on homepage controls."""
+    host = marketplace.lower().strip()
+    if host not in _AMAZON_MARKETPLACE_DOMAINS:
+        raise ValueError("unsupported Amazon marketplace")
+    return f"https://www.{host}/s?{urlencode({'k': keyword})}"
+
+
+def _amazon_verification_challenge(page) -> bool:
+    """Classify visible Amazon verification pages; never attempt to bypass them."""
+    try:
+        title = str(page.title() or "").casefold()
+        body = str(page.locator("body").inner_text(timeout=2_000) or "").casefold()[:8_000]
+    except Exception:
+        return False
+    markers = (
+        "robot check",
+        "captcha",
+        "enter the characters you see below",
+        "sorry, we just need to make sure you're not a robot",
+        "automated access to amazon",
+        "unusual traffic",
+    )
+    return any(marker in title or marker in body for marker in markers)
+
+
+def _amazon_product_result_locator(page):
+    """Find a visible product-detail link across known Amazon result-card layouts."""
+    selectors = (
+        "div[data-component-type='s-search-result'] h2 a[href*='/dp/']",
+        "div.s-result-item[data-asin]:not([data-asin='']) h2 a[href*='/dp/']",
+        "div[data-component-type='s-search-result'] a[href*='/dp/']",
+        "h2 a[href*='/dp/']",
+        "a[href*='/dp/'][data-asin]",
+    )
+    for selector in selectors:
+        try:
+            matches = page.locator(selector)
+            for index in range(min(matches.count(), 10)):
+                candidate = matches.nth(index)
+                if not candidate.is_visible():
+                    continue
+                href = str(candidate.get_attribute("href") or "")
+                if "/dp/" in urlsplit(href).path:
+                    return candidate
+        except Exception:
+            continue
+    return None
 
 
 _AFFILIATE_CLIPBOARD_CANDIDATE_SCRIPT = """() => {
@@ -730,17 +780,39 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
                     raise ValueError("amazon_search_select requires a keyword up to 300 characters")
                 host = (urlsplit(page.url).hostname or "").lower().rstrip(".")
                 if host not in {d for d in _AMAZON_MARKETPLACE_DOMAINS} | {"www." + d for d in _AMAZON_MARKETPLACE_DOMAINS}:
-                    raise ValueError("Amazon search must start on the selected Amazon marketplace")
-                search_box = page.locator("input#twotabsearchtextbox").first
-                if not search_box.count() or not search_box.is_visible():
-                    raise ValueError("Amazon search box is unavailable; sign in or resolve the Amazon page manually")
-                search_box.fill(keyword)
-                search_box.press("Enter")
-                _assert_public_page(page)
-                page.wait_for_load_state("domcontentloaded", timeout=timeout)
-                results = page.locator("div[data-component-type='s-search-result'] h2 a[href*='/dp/']")
-                results.first.wait_for(state="visible", timeout=min(timeout, 15000))
-                results.first.click()
+                    raise ValueError("Amazon search must stay on the selected Amazon marketplace")
+                marketplace = host.removeprefix("www.")
+                current = urlsplit(page.url)
+                if not current.path.rstrip("/").endswith("/s"):
+                    response = page.goto(
+                        _amazon_search_url(marketplace, keyword),
+                        wait_until="domcontentloaded",
+                        timeout=timeout,
+                    )
+                    _assert_public_page(page)
+                    if response and response.status in {403, 429, 503}:
+                        raise ValueError(
+                            "Amazon temporarily rejected the search request; retry later or verify the account manually"
+                        )
+                else:
+                    page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                if _amazon_verification_challenge(page):
+                    raise ValueError(
+                        "Amazon requires human verification before search can continue; no automated bypass was attempted"
+                    )
+                product_link = _amazon_product_result_locator(page)
+                if product_link is None:
+                    try:
+                        visible_text = page.locator("body").inner_text(timeout=2_000).casefold()[:8_000]
+                    except Exception:
+                        visible_text = ""
+                    if "no results for" in visible_text or "did not match any products" in visible_text:
+                        raise ValueError("Amazon returned no products for this search keyword")
+                    raise ValueError(
+                        "Amazon search page loaded but no visible product card matched supported layouts; "
+                        "manual verification may be required or Amazon markup may have changed"
+                    )
+                product_link.click(timeout=min(timeout, 10_000))
                 _assert_public_page(page)
                 selected_host = (urlsplit(page.url).hostname or "").lower().rstrip(".")
                 if selected_host not in {d for d in _AMAZON_MARKETPLACE_DOMAINS} | {"www." + d for d in _AMAZON_MARKETPLACE_DOMAINS}:
@@ -1001,7 +1073,7 @@ def _amazon_product_tool_task(payload: dict) -> dict:
         "profile_ref": profile_ref,
         "timeout_ms": timeout_ms,
         "actions": [
-            {"type": "navigate", "url": f"https://www.{marketplace}/"},
+            {"type": "navigate", "url": _amazon_search_url(marketplace, keyword)},
             {"type": "amazon_search_select", "keyword": keyword},
             {"type": "amazon_sitestripe_get_link"},
             {"type": "affiliate_link"},
