@@ -236,3 +236,52 @@ def test_operator_token_cannot_access_agent_tool_endpoint(monkeypatch):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=3)
+
+
+def test_amazon_workflow_rejection_logs_safe_reason_only(monkeypatch, caplog):
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+    import json
+    import logging
+    import threading
+    from services.ucos_browser import server as module
+
+    monkeypatch.setenv("UCOS_BROWSER_AGENT_TOKEN", "agent-tool-test")
+    monkeypatch.setenv("UCOS_AMAZON_AGENT_ACCESS_APPROVED", "true")
+    monkeypatch.setenv("UCOS_AMAZON_AGENT_USER_AGENT", "UCOSPersonalBrowser Agent/UCOSPersonalBrowser")
+    monkeypatch.setattr(
+        module,
+        "_amazon_product_tool_task",
+        lambda _payload: (_ for _ in ()).throw(
+            ValueError("SiteStripe Text link option was not available")
+        ),
+    )
+    monkeypatch.setattr(module, "_record_task_run", lambda *args, **kwargs: None)
+    httpd = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(
+            f"http://127.0.0.1:{httpd.server_port}/tool/amazon/product",
+            data=json.dumps({"keyword": "test keyword"}).encode(),
+            headers={
+                "Authorization": "Bearer agent-tool-test",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with caplog.at_level(logging.WARNING, logger="ucos.browser"):
+            try:
+                urlopen(request, timeout=3)
+            except HTTPError as exc:
+                assert exc.code == 400
+                payload = json.loads(exc.read().decode())
+                assert payload["error"] == "SiteStripe Text link option was not available"
+            else:
+                raise AssertionError("Amazon task rejection should return HTTP 400")
+        assert "Amazon browser task rejected reason=SiteStripe Text link option was not available" in caplog.text
+        assert "agent-tool-test" not in caplog.text
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=3)
