@@ -26,6 +26,7 @@ def test_amazon_agent_tool_runs_search_select_sitestripe_and_returns_url_only(mo
         "navigate", "amazon_search_select", "amazon_sitestripe_get_link", "affiliate_link"
     ]
     assert captured["actions"][1]["keyword"] == "3 tier spice rack"
+    assert captured["actions"][0]["url"] == "https://www.amazon.com/s?k=3+tier+spice+rack"
 
 
 def test_amazon_agent_tool_rejects_unverified_or_plain_product_url(monkeypatch):
