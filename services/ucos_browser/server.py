@@ -201,7 +201,7 @@ def _click_sitestripe_get_link(page, timeout: int) -> bool:
     if page not in candidates:
         candidates.insert(0, page)
 
-    exact_name = re.compile(r"^\\s*get\\s*link\\s*$", re.I)
+    exact_name = re.compile(r"^\s*get\s*link\s*$", re.I)
     for frame in candidates:
         locators = []
         try:
