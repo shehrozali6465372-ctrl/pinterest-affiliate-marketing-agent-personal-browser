@@ -221,7 +221,7 @@ def _click_sitestripe_get_link(page, timeout: int) -> bool:
     frames = list(getattr(page, "frames", None) or [])
     if page not in frames:
         frames.insert(0, page)
-    pattern = re.compile(r"get\\s*link", re.I)
+    pattern = re.compile(r"get\s*link", re.I)
     for frame in frames:
         candidates = []
         try:
@@ -288,7 +288,7 @@ def _sitestripe_control_diagnostics(page) -> dict:
                     const title = String(e.getAttribute('title') || '').slice(0, 100);
                     const id = String(e.id || '').slice(0, 100);
                     const all = [text, aria, title, id].join(' ');
-                    if (!/get\\s*link/i.test(all)) return null;
+                    if (!/get\s*link/i.test(all)) return null;
                     const r = e.getBoundingClientRect();
                     const style = getComputedStyle(e);
                     return {
