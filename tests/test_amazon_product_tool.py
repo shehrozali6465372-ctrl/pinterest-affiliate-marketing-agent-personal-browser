@@ -78,15 +78,20 @@ def test_amazon_verification_page_is_classified_without_bypass():
     assert _amazon_verification_challenge(Page()) is True
 
 
-def test_amazon_product_result_locator_uses_fallback_card_selector():
+def test_amazon_product_result_locator_uses_fallback_title_link():
     from services.ucos_browser.server import _amazon_product_result_locator
 
     class Candidate:
         def is_visible(self):
             return True
         def get_attribute(self, name):
-            assert name == "href"
-            return "/dp/B012345678?ref=sr_1_1"
+            return {
+                "aria-hidden": None,
+                "href": "/dp/B012345678?ref=sr_1_1",
+            }.get(name)
+        def inner_text(self, timeout):
+            assert timeout == 1_000
+            return "3-Tier Spice Rack Organizer"
 
     class Empty:
         def count(self):
@@ -97,7 +102,9 @@ def test_amazon_product_result_locator_uses_fallback_card_selector():
             return 1
         def nth(self, index):
             assert index == 0
-            return Candidate()
+            return candidate
+
+    candidate = Candidate()
 
     class Page:
         def locator(self, selector):
@@ -105,17 +112,70 @@ def test_amazon_product_result_locator_uses_fallback_card_selector():
                 return Matches()
             return Empty()
 
-    assert _amazon_product_result_locator(Page()) is not None
+    assert _amazon_product_result_locator(Page()) is candidate
 
 
-def test_amazon_product_result_locator_ignores_non_product_links():
+def test_amazon_product_result_locator_skips_aria_hidden_image_and_uses_title():
+    from services.ucos_browser.server import _amazon_product_result_locator
+
+    class Candidate:
+        def __init__(self, href, *, aria_hidden=None, label=""):
+            self.href = href
+            self.aria_hidden = aria_hidden
+            self.label = label
+        def is_visible(self):
+            return True
+        def get_attribute(self, name):
+            return {"aria-hidden": self.aria_hidden, "href": self.href}.get(name)
+        def inner_text(self, timeout):
+            return self.label
+
+    image = Candidate(
+        "/dp/B012345678/image",
+        aria_hidden="true",
+        label="",
+    )
+    title = Candidate(
+        "/dp/B012345678/title",
+        label="3-Tier Spice Rack Organizer",
+    )
+
+    class Matches:
+        def __init__(self, candidates):
+            self.candidates = candidates
+        def count(self):
+            return len(self.candidates)
+        def nth(self, index):
+            return self.candidates[index]
+
+    class Empty:
+        def count(self):
+            return 0
+
+    class Page:
+        def locator(self, selector):
+            if selector == "div[data-component-type='s-search-result'] h2 a[href*='/dp/']":
+                return Matches([image])
+            if selector == "div[data-component-type='s-search-result'] a.a-link-normal.a-text-normal[href*='/dp/']":
+                return Matches([title])
+            return Empty()
+
+    assert _amazon_product_result_locator(Page()) is title
+
+
+def test_amazon_product_result_locator_rejects_non_product_and_unlabelled_links():
     from services.ucos_browser.server import _amazon_product_result_locator
 
     class Candidate:
         def is_visible(self):
             return True
         def get_attribute(self, name):
-            return "/help/contact-us"
+            return {
+                "aria-hidden": None,
+                "href": "/help/contact-us",
+            }.get(name)
+        def inner_text(self, timeout):
+            return "Contact us"
 
     class Matches:
         def count(self):

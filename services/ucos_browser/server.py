@@ -169,13 +169,15 @@ def _amazon_verification_challenge(page) -> bool:
 
 
 def _amazon_product_result_locator(page):
-    """Find a visible product-detail link across known Amazon result-card layouts."""
+    """Find a human-visible Amazon product title link, never an aria-hidden image link."""
     selectors = (
         "div[data-component-type='s-search-result'] h2 a[href*='/dp/']",
         "div.s-result-item[data-asin]:not([data-asin='']) h2 a[href*='/dp/']",
-        "div[data-component-type='s-search-result'] a[href*='/dp/']",
+        "div[data-component-type='s-search-result'] a.a-link-normal.a-text-normal[href*='/dp/']",
+        "div[data-component-type='s-search-result'] a.a-link-normal.s-underline-text[href*='/dp/']",
         "h2 a[href*='/dp/']",
         "a[href*='/dp/'][data-asin]",
+        "div[data-component-type='s-search-result'] a[href*='/dp/']:not([aria-hidden='true'])",
     )
     for selector in selectors:
         try:
@@ -184,9 +186,21 @@ def _amazon_product_result_locator(page):
                 candidate = matches.nth(index)
                 if not candidate.is_visible():
                     continue
+                if str(candidate.get_attribute("aria-hidden") or "").strip().lower() == "true":
+                    continue
                 href = str(candidate.get_attribute("href") or "")
-                if "/dp/" in urlsplit(href).path:
-                    return candidate
+                if "/dp/" not in urlsplit(href).path:
+                    continue
+                # A product thumbnail can be CSS-visible but deliberately removed
+                # from the accessibility tree. Require a human-readable title link
+                # rather than clicking an aria-hidden image anchor.
+                try:
+                    label = str(candidate.inner_text(timeout=1_000) or "").strip()
+                except Exception:
+                    label = ""
+                if not label:
+                    continue
+                return candidate
         except Exception:
             continue
     return None
