@@ -446,6 +446,26 @@ _AFFILIATE_CLIPBOARD_CAPTURE_SCRIPT = r"""
 """
 
 
+def _wait_for_render(page, timeout_ms: int = 8_000) -> None:
+    """Wait briefly for navigation paint without requiring network-idle on retail pages."""
+    budget = max(0, min(int(timeout_ms), 10_000))
+    if budget:
+        try:
+            page.wait_for_load_state("load", timeout=budget)
+        except Exception:
+            # Amazon keeps analytics/personalization requests alive; load-state
+            # timeout is a hint, not a failed navigation.
+            pass
+        try:
+            page.wait_for_function(
+                "() => document.readyState === 'complete' && !!document.body",
+                timeout=min(1_500, budget),
+            )
+        except Exception:
+            pass
+    page.wait_for_timeout(150)
+
+
 def _focused_element_state(page) -> dict:
     """Return best-effort focus metadata without failing a successful navigation click."""
     try:
@@ -898,6 +918,10 @@ def _execute_task_on_browser_thread(task: dict) -> dict:
             elif kind == "wait":
                 ms = max(0, min(int(action.get("ms", 250)), 10_000))
                 page.wait_for_timeout(ms)
+            elif kind == "wait_for_render":
+                wait_ms = max(0, min(int(action.get("timeout_ms", 8_000)), 10_000))
+                _wait_for_render(page, wait_ms)
+                result["events"].append({"type": "wait_for_render", "timeout_ms": wait_ms})
             elif kind == "press":
                 selector = str(action.get("selector", "")).strip()
                 key = str(action.get("key", "")).strip()
